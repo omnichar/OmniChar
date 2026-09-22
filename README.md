@@ -6,6 +6,7 @@
 
 A free, open-source app for AI generation where your characters stay the same. Build a character once and keep the same face across shots and models, generate locally on your own GPU or with hosted models, train your own LoRAs, and keep every render as a versioned take.
 
+[![Website][website-shield]][website-url]
 [![License: GPLv3][license-shield]][license-url]
 [![Python 3.11+][python-shield]][python-url]
 [![Latest release][release-shield]][release-url]
@@ -17,6 +18,8 @@ A free, open-source app for AI generation where your characters stay the same. B
 
 </div>
 
+[website-shield]: https://img.shields.io/badge/Website-omnichar.org-blue?style=flat
+[website-url]: https://omnichar.org
 [license-shield]: https://img.shields.io/badge/License-GPLv3-blue?style=flat
 [license-url]: LICENSE
 [python-shield]: https://img.shields.io/badge/Python-3.11%2B-blue?style=flat&logo=python&logoColor=white
@@ -25,8 +28,8 @@ A free, open-source app for AI generation where your characters stay the same. B
 [release-url]: ../../releases/latest
 [discord-shield]: https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white&style=flat
 [discord-url]: https://discord.gg/cSUS88VdY9
-[reddit-shield]: https://img.shields.io/badge/Reddit-r%2Finlinestudio-FF4500?logo=reddit&logoColor=white&style=flat
-[reddit-url]: https://www.reddit.com/r/inlinestudio/
+[reddit-shield]: https://img.shields.io/badge/Reddit-r%2Fomnichar-FF4500?logo=reddit&logoColor=white&style=flat
+[reddit-url]: https://www.reddit.com/r/omnichar/
 
 [**New here? Start with the getting started guide →**](https://omnichar.org/getting-started)
 
@@ -410,7 +413,7 @@ Install community-built nodes from a GitHub repo, from the Extensions dialog or 
 install is security-reviewed, dependencies are isolated from the shared torch runtime, and nodes
 appear on the canvas immediately with no restart.
 
-Browse the [registry](https://github.com/inlineresearch/Inline-Registry), or copy the
+Browse the [registry](https://github.com/omnichar/Inline-Registry), or copy the
 [extension guide](https://github.com/omnichar/Inline-Studio-Extension-Guide) to build your own.
 
 ## FAQ

@@ -392,7 +392,9 @@ import torch
 sys.exit(0 if torch.version.cuda else 1)' 2>/dev/null; then
     echo "WARNING: the torch that got installed is a CPU-ONLY build. Generation would run on the"
     echo "         CPU, roughly 100x slower. Re-run with an explicit index, e.g."
-    echo "         ./webui.sh --install --torch-index cu126"
+    # The extras and the index this run actually chose, not a fixed pair: a re-run without them
+    # installs less than the person already had.
+    echo "         ./webui.sh --install --extra $EXTRAS --torch-index $TORCH_CHOICE"
   fi
   # What the installer intended versus what landed. Nothing reads this yet; it exists so the next
   # bug report carries its own diagnosis instead of a guess. Beside the target interpreter, not a

@@ -239,7 +239,8 @@ rem TARGET_PY, not PY which is unset until :pick_python, and a torch probe not a
 "!TARGET_PY!" -c "import importlib.util as u,sys;sys.exit(0 if u.find_spec('torch') is None else (0 if __import__('torch').version.cuda else 1))" >nul 2>nul && goto install_done
 echo WARNING: the torch that got installed is a CPU-ONLY build. Generation would run on the
 echo          CPU, roughly 100x slower. Re-run with an explicit index, e.g.
-echo          .\webui.bat --install --torch-index !TORCH_CHOICE! --recreate
+rem Carries the extras, because --recreate wipes the venv and they would otherwise fall back to the default.
+echo          .\webui.bat --install --extra !EXTRAS! --torch-index !TORCH_CHOICE! --recreate
 
 :install_done
 set "CORE_VERSION=unknown"

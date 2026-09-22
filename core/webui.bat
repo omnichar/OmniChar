@@ -235,7 +235,8 @@ call :write_install_record
 rem A CPU-only wheel on a GPU box is silent at runtime and ~100x slower, so say it here rather than
 rem let it through: it can still happen if PyPI ever outranks the CUDA index on version.
 if /i "!TORCH_CHOICE!"=="cpu" goto install_done
-"%PY%" -c "import os,sys;from importlib import util,import_module;found=[n for n in ('omnichar_frontend','openchar_frontend') if util.find_spec(n)];sys.exit(0 if any(os.path.isfile(os.path.join(os.path.dirname(import_module(n).__file__),'static','index.html')) for n in found) else 1)" >nul 2>nul && exit /b 0
+rem TARGET_PY, not PY which is unset until :pick_python, and a torch probe not a web UI one: the question here is whether the wheel that landed carries CUDA.
+"!TARGET_PY!" -c "import importlib.util as u,sys;sys.exit(0 if u.find_spec('torch') is None else (0 if __import__('torch').version.cuda else 1))" >nul 2>nul && goto install_done
 echo WARNING: the torch that got installed is a CPU-ONLY build. Generation would run on the
 echo          CPU, roughly 100x slower. Re-run with an explicit index, e.g.
 echo          .\webui.bat --install --torch-index !TORCH_CHOICE! --recreate
@@ -343,7 +344,8 @@ exit /b 1
 rem Succeeds (errorlevel 0) when a web UI is resolvable; sets INLINE_FRONTEND_ROOT for a local build.
 if defined INLINE_FRONTEND_ROOT if exist "%INLINE_FRONTEND_ROOT%\index.html" exit /b 0
 rem Both names, new first, so an install predating the rename still counts as having a UI.
-"%PY%" -c "import os,sys;from importlib import import_module;[sys.exit(0) for n in ('omnichar_frontend','openchar_frontend') for m in [__import__('importlib').util.find_spec(n)] if m and os.path.isfile(os.path.join(os.path.dirname(import_module(n).__file__),'static','index.html'))];sys.exit(1)" >nul 2>nul && exit /b 0
+rem util imported by name, never reached as an attribute: a uv venv has no .pth file to pull it in, so the attribute form raised AttributeError and the discarded stderr hid it.
+"%PY%" -c "import os,sys;from importlib import util,import_module;found=[n for n in ('omnichar_frontend','openchar_frontend') if util.find_spec(n)];sys.exit(0 if any(os.path.isfile(os.path.join(os.path.dirname(import_module(n).__file__),'static','index.html')) for n in found) else 1)" >nul 2>nul && exit /b 0
 if exist "..\dist-web\index.html" (
   for %%I in ("..\dist-web") do set "INLINE_FRONTEND_ROOT=%%~fI"
   exit /b 0
@@ -357,7 +359,8 @@ echo No web UI found - installing the prebuilt package (omnichar-frontend)...
 call :frontend_available && exit /b 0
 if exist "..\package.json" (
   where npm >nul 2>nul && (
-    echo Building the web UI from source (npm)...
+    rem Parens escaped: cmd ends the enclosing block at a bare one and then chokes on the ellipsis.
+    echo Building the web UI from source ^(npm^)...
     pushd ..
     call npm ci && call npm run build:spa
     popd

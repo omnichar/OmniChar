@@ -86,8 +86,8 @@ FLUX2 = NodeDescriptor(
         # Only an undistilled klein checkpoint runs real CFG; on dev and the distilled builds this
         # is ignored (dev is guidance-distilled and its pipeline has no negative path at all).
         ParamField("negative_prompt", "Negative prompt (base models only)", Widget.TEXTAREA, ""),
-        ParamField("width", "Width", Widget.NUMBER, 1024, min=256, max=2048, step=64),
-        ParamField("height", "Height", Widget.NUMBER, 1024, min=256, max=2048, step=64),
+        ParamField("width", "Width", Widget.NUMBER, 1024, min=256, max=4096, step=64),
+        ParamField("height", "Height", Widget.NUMBER, 1024, min=256, max=4096, step=64),
         ParamField(
             "steps", "Steps (0 = from model)", Widget.NUMBER, _AUTO_STEPS, min=0, max=100, step=1
         ),

@@ -95,7 +95,9 @@ def test_sorts_are_cached_separately(monkeypatch: pytest.MonkeyPatch, data_dir: 
 def test_page_url_is_filled_in_when_the_site_omits_it(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wf, "_fetch", lambda *_a: wf._Fetched(body=_body(1), etag=None))
     entry = wf.list_workflows()["entries"][0]
-    assert entry["pageUrl"] == "https://inlinestudio.art/workflows/w0"
+    # Read off the constant, not written out: as a literal this went stale at the rename and the
+    # suite failed on a domain the code had already stopped using.
+    assert entry["pageUrl"] == f"{wf.DEFAULT_CATALOGUE_URL}/workflows/w0"
 
 
 def test_the_sites_own_page_url_wins(monkeypatch: pytest.MonkeyPatch) -> None:

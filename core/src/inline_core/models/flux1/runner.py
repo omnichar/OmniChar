@@ -74,8 +74,8 @@ FLUX1 = NodeDescriptor(
     outputs=(Port("image", "Image", PortKind.IMAGE),),
     params=(
         # No negative prompt: dev is guidance-distilled and FluxPipeline has no negative path.
-        ParamField("width", "Width", Widget.NUMBER, 1024, min=256, max=2048, step=64),
-        ParamField("height", "Height", Widget.NUMBER, 1024, min=256, max=2048, step=64),
+        ParamField("width", "Width", Widget.NUMBER, 1024, min=256, max=4096, step=64),
+        ParamField("height", "Height", Widget.NUMBER, 1024, min=256, max=4096, step=64),
         ParamField("steps", "Steps (0 = from model)", Widget.NUMBER, _AUTO_STEPS, min=0, max=100,
                    step=1),
         ParamField("guidance", "Guidance (-1 = from model)", Widget.NUMBER, _AUTO_GUIDANCE,

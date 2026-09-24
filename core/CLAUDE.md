@@ -263,8 +263,19 @@ real codec that moves tensors lives with the model runner.
   serves source nodes. Never import a heavy dep at package top level outside a runner subpackage.
 - **Engine isolation.** All xDiT/worker knowledge lives behind `parallel/` and the sampler seam.
   Don't scatter it.
+- **Reading a `.char` belongs to `omnichar-char`; writing one stays here.** The reader was lifted
+  out so other tools can open a character without this engine, and `characters/charfile.py`
+  re-exports it so call sites read unchanged. A base dependency rather than an extra, because
+  `characters/` is not import-guarded: the package must be installable before `omnichar-core` is.
 - **Bring-your-own models.** Nothing is downloaded by the engine. The catalog scans; the user places
   files. A model picker is a `SELECT` param with `options_from="<category>"`.
+- **A wrong pick is an error, not a special case.** An `options_from` picker offers whatever is in
+  that category, so the H3 audio VAE can be chosen for the video slot, and one partition's
+  transformer for the other partition's node - both have happened in production. Neither earns
+  model-specific validation in the engine: it loads what it was pointed at and reports the failure,
+  which is the same contract ComfyUI has and the right one for a generic node engine. Where an
+  option should not have been offered at all, narrowing the list belongs to whatever built it - a
+  caller that generates its own forms, not this engine.
 - **Adapter strength is not a quality metric, and a threshold on it is a false-positive machine.**
   Measured against real bases, published LoRAs that work well span `|B@A| / |W|` from 0.017%
   (a style LoRA) to 1.2% (a restoration LoRA), so "this adapter looks weak" is not a finding. What

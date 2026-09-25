@@ -27,7 +27,7 @@ from .. import loaders
 from .. import pipeline_runtime as rt
 from ..checkpoint import CheckpointReader
 from ..comfy_int8 import Int8Spec, int8_layers_of, marker_format
-from ..int8_linear import dequantize, load_scale, swap_linears
+from ..int8_linear import convert_with_scales, dequantize, load_scale, swap_linears
 from ..offload import (
     apply_offload,
     blocks_that_fit,
@@ -960,9 +960,16 @@ def _load_vae(
     config = {k: v for k, v in _metadata_config(path).items() if k in accepted}
     model = cls(**config) if config else cls()
     state = load_file(str(path))
+    int8 = int8_layers_of(CheckpointReader(path), path.name)
     if remap:
         targets = sorted(dict(model.named_parameters()) | dict(model.named_buffers()))
-        state = _remapped_vae_state(state, audio=(remap == "audio"), target_keys=targets)
+
+        def convert(sd: dict[str, Any]) -> dict[str, Any]:
+            return _remapped_vae_state(sd, audio=(remap == "audio"), target_keys=targets)
+
+        # ComfyUI's int8 build keeps its decoder Linears int8; the scales ride the same row plan.
+        state, int8 = convert_with_scales(convert, state, int8) if int8 else (convert(state), {})
+    swap_linears(model, int8, dtype)
     missing, unexpected = model.load_state_dict(state, strict=False)
     unfilled = [key for key in missing if not _self_computed(key)]
     if unfilled:

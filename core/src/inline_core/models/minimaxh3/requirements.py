@@ -29,10 +29,12 @@ COMFY_REPO = "Comfy-Org/MiniMax-H3"
 MINIMAX_REPO = "MiniMaxAI/MiniMax-H3"
 
 FL2VA_FILE = "minimax_h3_fl2va_bf16.safetensors"
-#: A third the download for the same model. Generation only: the trainer needs the timestep path a
-#: pruned build does not ship, and it saves nothing in VRAM because the base is quantised anyway.
+#: The generation default: ComfyUI's int8 build, a third the download, and it stays int8 in VRAM.
+#: Pruned builds do not train, because the trainer needs the timestep path they do not ship.
+FL2VA_INT8_FILE = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 FL2VA_FP8_FILE = "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
 REF2VA_FILE = "minimax_h3_ref2va_bf16.safetensors"
+REF2VA_INT8_FILE = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
 REF2VA_FP8_FILE = "minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
 TEXT_ENCODER_DIR = "FL2VA/text_encoder"
 #: Single-file conditioners. nvfp4 is 4-bit on disk and the default: the folder is quantised to NF4
@@ -40,6 +42,8 @@ TEXT_ENCODER_DIR = "FL2VA/text_encoder"
 ENCODER_NVFP4_FILE = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 ENCODER_BF16_FILE = "qwen3vl_32b_minimax_h3_bf16.safetensors"
 VIDEO_VAE_FILE = "minimax_h3_video_vae_fp16.safetensors"
+#: Only the decoder is int8, so it encodes exactly as the fp16 file does and suits training too.
+VIDEO_VAE_INT8_FILE = "minimax_h3_video_vae_int8_convrot.safetensors"
 AUDIO_VAE_FILE = "minimax_h3_audio_vae_fp32.safetensors"
 
 #: The tensor every H3 transformer has, at the shape only H3 has: 3 x 56 heads x 128 into 5376.
@@ -206,10 +210,13 @@ def resolve_transformer(partition: str, chosen: object = None) -> Path | None:
     picked = _picked("diffusion_models", chosen)
     if picked is not None:
         return picked
-    wanted = FL2VA_FILE if partition == "fl2va" else REF2VA_FILE
-    direct = resolve("diffusion_models", wanted)
-    if direct is not None:
-        return direct
+    defaults = (
+        (FL2VA_INT8_FILE, FL2VA_FILE) if partition == "fl2va" else (REF2VA_INT8_FILE, REF2VA_FILE)
+    )
+    for wanted in defaults:
+        direct = resolve("diffusion_models", wanted)
+        if direct is not None:
+            return direct
     recorded = _provenance().get(partition)
     if recorded:
         candidate = models_dir() / "diffusion_models" / recorded
@@ -373,6 +380,15 @@ def resident_bytes(path: Path) -> int:
     return total
 
 
+def resolve_video_vae(pick: object = None) -> Path | None:
+    """The video VAE: an explicit pick, else the int8 build, else the fp16 one."""
+    return (
+        _picked("vae", pick)
+        or resolve("vae", VIDEO_VAE_INT8_FILE)
+        or resolve("vae", VIDEO_VAE_FILE)
+    )
+
+
 def resolve_encoder(pick: str | None = None) -> Path | None:
     """The conditioner this node would load: an explicit pick, else the smallest build present."""
     picked = _picked("text_encoders", pick)
@@ -436,7 +452,7 @@ def footprint_bytes(
             diffusion = int(diffusion * (1 - ADALN_SHARE))
     elif factorised:
         diffusion = int(diffusion * (1 - ADALN_SHARE))
-    video = video_vae if video_vae is not None else resolve("vae", VIDEO_VAE_FILE)
+    video = video_vae if video_vae is not None else resolve_video_vae()
     return {
         "diffusion_bytes": diffusion,
         "text_encoder_bytes": encoder_bytes,

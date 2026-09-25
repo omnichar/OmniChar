@@ -283,3 +283,66 @@ def test_an_int8_conditioner_keeps_linears_int8_and_unrotates_its_table(  # type
     x = torch.randn(3, 64)
     want = x @ proj.T
     assert (model.get_submodule(linear)(x) - want).norm() / want.norm() < 0.02
+
+
+class _TinyDecoder(torch.nn.Module):
+    """The port's module paths for one ViT decoder block, at a size that fits a unit test."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        block = torch.nn.Module()
+        block.attn = torch.nn.Module()
+        for name in ("to_q", "to_k", "to_v"):
+            setattr(block.attn, name, torch.nn.Linear(64, 128, bias=False))
+        block.attn.to_out = torch.nn.ModuleList([torch.nn.Linear(128, 64, bias=False)])
+        block.ff = torch.nn.Module()
+        block.ff.net = torch.nn.ModuleList(
+            [torch.nn.Module(), torch.nn.Identity(), torch.nn.Linear(96, 64, bias=False)]
+        )
+        block.ff.net[0].proj = torch.nn.Linear(64, 192, bias=False)
+        self.decoder = torch.nn.Module()
+        self.decoder.transformer_blocks = torch.nn.ModuleList([block])
+
+
+def test_an_int8_video_vae_keeps_its_decoder_int8_through_the_key_plan(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """ComfyUI's int8 H3 VAE: the interleaved QKV split and FFN swap must carry each row's scale."""
+    import json
+
+    from safetensors.torch import save_file
+
+    from inline_core.models.comfy_int8 import Int8Spec
+    from inline_core.models.int8_linear import ComfyInt8Linear, quantize
+    from inline_core.models.keymap import interleave_rows
+    from inline_core.models.minimaxh3 import pipeline as h3
+
+    torch.manual_seed(0)
+    reference = _TinyDecoder()
+    block = reference.decoder.transformer_blocks[0]
+    qkv = interleave_rows(
+        torch.cat([block.attn.to_q.weight, block.attn.to_k.weight, block.attn.to_v.weight]), 3, 64
+    )
+    w1 = block.ff.net[0].proj.weight
+    source = {
+        "decoder.transformer_blocks.0.attn.to_qkv.weight": qkv,
+        "decoder.transformer_blocks.0.attn.to_out.weight": block.attn.to_out[0].weight,
+        "decoder.transformer_blocks.0.ff.w1.weight": torch.cat([w1[96:], w1[:96]]),
+        "decoder.transformer_blocks.0.ff.w2.weight": block.ff.net[2].weight,
+    }
+    marker = json.dumps({"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 16})
+    tensors = {}
+    for key, weight in source.items():
+        layer = key.removesuffix(".weight")
+        tensors[key], tensors[f"{layer}.weight_scale"] = quantize(weight.detach(), Int8Spec(16))
+        tensors[f"{layer}.comfy_quant"] = torch.tensor(list(marker.encode()), dtype=torch.uint8)
+    path = tmp_path / "minimax_h3_video_vae_int8_convrot.safetensors"
+    save_file(tensors, str(path))
+
+    loaded = h3._load_vae(_TinyDecoder, path, dtype=torch.float16, remap=True)
+
+    got = loaded.decoder.transformer_blocks[0]
+    assert isinstance(got.attn.to_k, ComfyInt8Linear)
+    assert got.attn.to_k.weight_scale.dtype is torch.float32, "the fp16 cast must not reach scales"
+    for name in ("attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"):
+        want = block.get_submodule(name).weight.detach()
+        step = want.abs().amax(dim=1, keepdim=True) / 127
+        assert ((got.get_submodule(name).weight.float() - want).abs() <= 3 * step).all(), name

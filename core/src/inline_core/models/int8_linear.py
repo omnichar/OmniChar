@@ -92,6 +92,14 @@ class ComfyInt8Linear(nn.Module):
         """A dequantised copy; ``forward`` uses it only on devices with no int8 GEMM."""
         return dequantize(self.qweight, self.weight_scale, self.spec).to(self.compute_dtype)
 
+    def _apply(self, fn: Any, recurse: bool = True) -> Any:
+        # ``.to(fp16)`` casts float buffers too, and a half-precision scale shifts each row's gain.
+        scale = self.weight_scale
+        result = super()._apply(fn, recurse)
+        if self.weight_scale.dtype is not torch.float32 and not scale.is_meta:
+            self.weight_scale = scale.to(self.weight_scale.device)
+        return result
+
     def _load_from_state_dict(
         self, state_dict: dict[str, Any], prefix: str, *args: Any, **kwargs: Any
     ) -> None:

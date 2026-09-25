@@ -25,6 +25,9 @@ from ...device.policy import DevicePolicy
 from ...errors import ComponentError
 from .. import loaders
 from .. import pipeline_runtime as rt
+from ..checkpoint import CheckpointReader
+from ..comfy_int8 import Int8Spec, int8_layers_of, marker_format
+from ..int8_linear import convert_with_scales, dequantize, load_scale, swap_linears
 from ..offload import (
     apply_offload,
     blocks_that_fit,
@@ -113,17 +116,22 @@ def load_pipeline(
         reqs.resolve("text_encoders", "MiniMax-H3-processor"), "the tokenizer and processor"
     )
     video_vae_path = _wired(video_vae) or _require(
-        reqs.resolve("vae", reqs.VIDEO_VAE_FILE, params.get("vae")), "the video VAE"
+        reqs.resolve_video_vae(params.get("vae")), "the video VAE"
     )
     audio_vae = _require(reqs.resolve("vae", reqs.AUDIO_VAE_FILE), "the audio VAE")
 
     # A pruned build has already had this done to it, and re-running the transform would multiply a
     # rank-8 projection by a full-width basis. Same shape of rule as never re-quantising a
     # prequantized checkpoint, and the same reason: the source is already in the target form.
-    if reqs.inspect_file(transformer_path).pruned:
+    candidate = reqs.inspect_file(transformer_path)
+    if candidate.pruned:
         if factorise_adaln:
             logger.info("%s ships its AdaLN reduced; skipping ours.", transformer_path.name)
         factorise_adaln = False
+    # The pruned rule again: a ComfyUI int8 source is already in its target form.
+    prequantized = candidate.quantisation == "int8"
+    if prequantized:
+        factorise_adaln = quantize = False
 
     # Hand the policy the on-disk sizes so it fits dtype and quantisation to THIS card, then refuse
     # an impossible load up front. Without this it falls back to coarse VRAM buckets and tries to
@@ -153,7 +161,9 @@ def load_pipeline(
         # The two partitions are structurally identical, so without this they would share a cache
         # entry and the second load would silently reuse the first partition's weights.
         variant=partition,
-        quant=(policy.quantization().value if quantize else "bf16")
+        quant=(
+            "comfy-int8" if prequantized else policy.quantization().value if quantize else "bf16"
+        )
         + (f"+adaln{_adaln_rank(adaln_rank)}" if factorise_adaln else "")
         # Part of the key because it changes where the weights are placed, not just how they run.
         + ("+staged" if staged else ""),
@@ -292,10 +302,9 @@ def _build(
     _placement_kwargs = _encoder_placement(placement) if encoder_quant is not None else {}
     _encoder_on_card = _placement_kwargs.get("device_map", {}).get("") not in (None, "cpu")
     if _is_nvfp4(encoder_dir):
-        # Already 4-bit on disk, so the NF4 rung would be quantising a quantised file - the same
-        # rule that turns quantization off for any prequantized source.
+        # Already nvfp4 or int8 on disk, so the NF4 rung would quantise a quantised file.
         _encoder_on_card = False
-        text_encoder = _load_nvfp4_encoder(encoder_dir, dtype)
+        text_encoder = _load_packed_encoder(encoder_dir, dtype)
     else:
         text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
             str(_encoder_source(encoder_dir)),
@@ -560,15 +569,9 @@ _ENCODER_RESIDENT_GB = 20.5
 #: The `models/loaders.py` spec key for this family's one-time config assets.
 ASSETS_ARCH = "minimax-h3"
 
-#: Encoder builds we cannot read, with the reason, rather than failing deep inside transformers.
-_ENCODER_REFUSED = {
-    "int8_convrot": "an int8 rotation repack this loader cannot undo",
-    "nvfp4_awq": "",
-}
-
 
 def _is_nvfp4(path: Path) -> bool:
-    """Whether a single-file encoder carries ComfyUI's nvfp4 marker."""
+    """Whether a single-file encoder carries ComfyUI's packed markers (nvfp4 or int8)."""
     if path.is_dir() or path.suffix.lower() not in (".safetensors", ".sft"):
         return False
     from ..checkpoint import prequantized_kind
@@ -592,9 +595,6 @@ def _encoder_source(path: Path) -> Path:
     """
     if path.is_dir():
         return path
-    for marker, reason in _ENCODER_REFUSED.items():
-        if reason and marker in path.name:
-            raise ComponentError(f"{path.name} is {reason}. Use the bf16 or nvfp4 build instead.")
     from ..loaders import _staged_encoder_dir
 
     return _staged_encoder_dir(ASSETS_ARCH, str(path))
@@ -620,8 +620,8 @@ def _nvfp4_layers(keys: set[str]) -> int:
     return max(found) + 1 if found else 0
 
 
-def _load_nvfp4_encoder(path: Path, dtype: Any) -> Any:
-    """Qwen3-VL from an NVFP4 file, with every quantised Linear left packed.
+def _load_packed_encoder(path: Path, dtype: Any) -> Any:
+    """Qwen3-VL from a ComfyUI nvfp4 or int8 file, with every quantised Linear left packed.
 
     Built on ``meta`` and populated by hand because transformers has no reader for this format;
     materialising it first would want the 51 GB the packed file exists to avoid. The build is
@@ -673,11 +673,20 @@ def _load_nvfp4_encoder(path: Path, dtype: Any) -> Any:
                 f"{formats[sorted(unknown)[0]]!r}, which this loader cannot read."
             )
         _swap_packed_linears(model, linears, dtype)
-        # Tensor-wise int8 is the embedding, read once per prompt: keeping it packed would trade
-        # about a gigabyte for dequantising the whole vocabulary on every forward.
-        for name in plain:
-            _unpack_int8(model, handle, name, dtype)
-        missing = _load_into(model, handle, keys, skip={f"{n}.weight" for n in plain})
+        sources = {_nvfp4_key(k.removesuffix(".comfy_quant")): k.removesuffix(".comfy_quant")
+                   for k in keys if k.endswith(".comfy_quant")}
+        int8 = _int8_specs(CheckpointReader(path), sources, plain, path.name)
+        # An int8 embedding is read once per prompt, so it is unpacked; int8 Linears stay int8.
+        tables = {n for n in int8 if not isinstance(model.get_submodule(n), torch.nn.Linear)}
+        specs = {n: spec for n, spec in int8.items() if n not in tables}
+        swap_linears(model, specs, dtype)
+        for name in tables:
+            _unpack_int8(model, handle, sources[name], name, int8[name], dtype)
+        _load_int8_linears(model, handle, {n: sources[n] for n in specs})
+        skip = {f"{n}.weight" for n in tables} | {
+            f"{n}.{leaf}" for n in specs for leaf in ("qweight", "weight_scale")
+        }
+        missing = _load_into(model, handle, keys, skip=skip)
     available_keys = {_nvfp4_key(key) for key in keys}
     if missing:
         raise ComponentError(
@@ -689,8 +698,8 @@ def _load_nvfp4_encoder(path: Path, dtype: Any) -> Any:
     if "lm_head.weight" not in available_keys:
         model.lm_head = torch.nn.Identity()
     logger.info(
-        "MiniMax H3 conditioner: %d layers, %d nvfp4 linears, %d int8 tables, from %s",
-        layers, len(linears), len(plain), path.name,
+        "MiniMax H3 conditioner: %d layers, %d nvfp4 linears, %d int8 linears, %d int8 tables, "
+        "from %s", layers, len(linears), len(specs), len(tables), path.name,
     )
     return model
 
@@ -727,19 +736,37 @@ def _packed_formats(handle: Any, keys: set[str]) -> dict[str, str]:
             marker = json.loads(raw)
         except ValueError:
             marker = {}
-        out[_nvfp4_key(key[: -len(".comfy_quant")])] = str(marker.get("format") or raw)
+        out[_nvfp4_key(key[: -len(".comfy_quant")])] = str(marker_format(marker) or raw)
     return out
 
 
-def _unpack_int8(model: Any, handle: Any, name: str, dtype: Any) -> None:
-    """A tensor-wise int8 weight back to ``dtype``, in place: ``int8 * per-row scale``."""
-    import torch
+def _int8_specs(
+    reader: CheckpointReader, sources: dict[str, str], names: set[str], label: str
+) -> dict[str, Int8Spec]:
+    """Each int8 layer's spec from its own marker, under the module name transformers built."""
+    found = int8_layers_of(reader, label)
+    missed = sorted(n for n in names if sources.get(n) not in found)
+    if missed:
+        raise ComponentError(f"{label}: {missed[0]} is marked int8 but is not an int8 layer.")
+    return {n: found[sources[n]] for n in names}
 
-    module = model.get_submodule(name)
-    source = name.replace("model.language_model.", "model.", 1)
-    weight = handle.get_tensor(f"{source}.weight").to(torch.float32)
-    weight = weight * handle.get_tensor(f"{source}.weight_scale").to(torch.float32)
-    module.weight = torch.nn.Parameter(weight.to(dtype), requires_grad=False)
+
+def _load_int8_linears(model: Any, handle: Any, sources: dict[str, str]) -> None:
+    for name, source in sources.items():
+        module = model.get_submodule(name)
+        codes = handle.get_tensor(f"{source}.weight")
+        module.qweight = codes
+        module.weight_scale = load_scale(handle.get_tensor(f"{source}.weight_scale"), len(codes))
+
+
+def _unpack_int8(
+    model: Any, handle: Any, source: str, name: str, spec: Int8Spec, dtype: Any
+) -> None:
+    """A tensor-wise int8 table back to ``dtype`` in place, un-rotated when its marker says so."""
+    weight = dequantize(
+        handle.get_tensor(f"{source}.weight"), handle.get_tensor(f"{source}.weight_scale"), spec
+    )
+    model.get_submodule(name).weight = torch.nn.Parameter(weight.to(dtype), requires_grad=False)
 
 
 def _load_into(model: Any, handle: Any, keys: set[str], *, skip: set[str]) -> set[str]:
@@ -932,9 +959,16 @@ def _load_vae(
     config = {k: v for k, v in _metadata_config(path).items() if k in accepted}
     model = cls(**config) if config else cls()
     state = load_file(str(path))
+    int8 = int8_layers_of(CheckpointReader(path), path.name)
     if remap:
         targets = sorted(dict(model.named_parameters()) | dict(model.named_buffers()))
-        state = _remapped_vae_state(state, audio=(remap == "audio"), target_keys=targets)
+
+        def convert(sd: dict[str, Any]) -> dict[str, Any]:
+            return _remapped_vae_state(sd, audio=(remap == "audio"), target_keys=targets)
+
+        # ComfyUI's int8 build keeps its decoder Linears int8; the scales ride the same row plan.
+        state, int8 = convert_with_scales(convert, state, int8) if int8 else (convert(state), {})
+    swap_linears(model, int8, dtype)
     missing, unexpected = model.load_state_dict(state, strict=False)
     unfilled = [key for key in missing if not _self_computed(key)]
     if unfilled:

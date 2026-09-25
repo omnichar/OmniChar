@@ -12,7 +12,7 @@ exactly. Projecting through that basis first lets each block store ``[96768, 8]`
 MiniMax ship a pruned build that does the same thing with a 1025-row lookup table. This derives the
 factorisation from the bf16 weights instead, which means:
 
-* no dependency on their ``convrot`` format, which only ComfyUI reads,
+* no dependency on their pruned or ``convrot`` builds being present,
 * **no discrete timestep grid**. They index a table, so a sampler whose sigmas fall between rows
   needs snapping or interpolation. Projecting a continuous ``t`` through the basis is exact for any
   timestep, so the sampler is unconstrained.

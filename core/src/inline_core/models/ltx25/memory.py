@@ -47,6 +47,7 @@ _ENCODER_STREAM_BYTES = 5 * 1024**3
 QUANT_NONE = ""
 QUANT_FP8_CAST = "fp8-cast"
 QUANT_NVFP4_PREQUANT = "nvfp4-prequant"
+QUANT_COMFY_INT8 = "comfy-int8"
 
 OFFLOAD_NONE = "none"
 OFFLOAD_CPU = "cpu"
@@ -97,6 +98,7 @@ def plan_for(
     fixed_bytes: int = 0,
     prequantised: bool = False,
     kernels_available: bool = False,
+    comfy_int8: bool = False,
 ) -> Ltx25Plan | None:
     """The load plan, or None when even the streaming buffer will not fit.
 
@@ -124,6 +126,12 @@ def plan_for(
         0,
         total_vram_bytes - fixed_bytes - _ACTIVATION_RESERVE_BYTES - _ENCODER_STREAM_BYTES,
     )
+
+    if comfy_int8:
+        # Resident or nothing: the vendored block streamer only fuses bf16 and fp8-cast layouts.
+        if model_bytes and budget >= model_bytes:
+            return Ltx25Plan(QUANT_COMFY_INT8, OFFLOAD_NONE, "ComfyUI int8, fully resident.")
+        return None
 
     if prequantised:
         # The file only loads through the NVFP4 path; without the kernels there is nothing to fall
@@ -185,6 +193,10 @@ def quantization_policy(plan: Ltx25Plan, checkpoint_path: str) -> Any | None:
         from .vendor.ltx_core.quantization.nvfp4 import build_nvfp4_prequant_policy
 
         return build_nvfp4_prequant_policy(checkpoint_path)
+    if plan.quantization == QUANT_COMFY_INT8:
+        from .int8_policy import build_policy as build_int8_policy
+
+        return build_int8_policy(checkpoint_path)
     return None
 
 

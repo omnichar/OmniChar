@@ -132,7 +132,7 @@ def test_an_fp8_build_never_stands_in_for_training(tmp_path, monkeypatch) -> Non
     # Generation is happy with what is on disk; training still names the full-precision build.
     generation = {c.id: c for c in reqs.components("fl2va")}
     assert generation["h3-fl2va"].optional
-    training = {c.id: c for c in reqs.components("fl2va", fp8_substitutes=False)}
+    training = {c.id: c for c in reqs.components("fl2va", pruned_substitutes=False)}
     assert not training["h3-fl2va"].optional
 
 

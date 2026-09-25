@@ -19,9 +19,10 @@ from typing import Any
 
 from ..config import data_dir, models_dirs, models_registry_url
 
-#: Precision tokens the published filenames use, longest first so fp8_scaled beats fp8.
+#: Precision tokens the published filenames use, each before any token it contains.
 PRECISIONS = (
-    "pruned_fp8_scaled", "fp8mixed", "nvfp4", "bf16", "fp16", "fp32", "fp8", "int8", "gguf",
+    "pruned_int8_convrot", "int8_convrot", "pruned_fp8_scaled",
+    "fp8mixed", "nvfp4", "bf16", "fp16", "fp32", "fp8", "int8", "gguf",
 )
 _TIMEOUT = 15
 

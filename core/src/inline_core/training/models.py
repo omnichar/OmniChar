@@ -113,12 +113,12 @@ def _resolve(arch: str, category: str, variant: Any = None) -> Any:
         from ..models.minimaxh3 import requirements as h3_reqs
 
         if category == "vae":
-            return h3_reqs.resolve("vae", h3_reqs.VIDEO_VAE_FILE)
+            return h3_reqs.resolve_video_vae(for_training=True)
         if category == "text_encoders":
             return h3_reqs.resolve_encoder()
         # Only fl2va trains: ref2va is the same architecture reached through reference conditioning,
         # so a LoRA learned on one loads on the other.
-        return h3_reqs.resolve_transformer("fl2va")
+        return h3_reqs.resolve_transformer("fl2va", for_training=True)
 
     if arch == archs.FLUX2:
         from ..models.flux2 import requirements as flux2_reqs

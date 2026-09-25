@@ -32,30 +32,26 @@ class MiniMaxH3Provider:
         FL2VA and Ref2VA are structurally identical - same 535 tensors, same shapes - so a renamed
         file cannot be identified by inspection. This is the only record of which is which.
         """
-        if component.id == "h3-fl2va":
-            reqs.record_provenance("fl2va", path.name)
-        elif component.id == "h3-ref2va":
-            reqs.record_provenance("ref2va", path.name)
+        # Every build of a partition counts: ``h3-ref2va-int8`` is as much ref2va as ``h3-ref2va``.
+        for partition in ("fl2va", "ref2va"):
+            if component.id == f"h3-{partition}" or component.id.startswith(f"h3-{partition}-"):
+                reqs.record_provenance(partition, path.name)
 
     def resolved(self) -> dict[str, str]:
         """What this node would load now, so the pickers show real files rather than "auto"."""
         picks = {
             "model": reqs.resolve_transformer(self._partition),
             "text_encoder": reqs.resolve_encoder(),
-            "vae": reqs.resolve("vae", reqs.VIDEO_VAE_FILE),
+            "vae": reqs.resolve_video_vae(),
         }
         return {key: Path(str(value)).name for key, value in picks.items() if value}
 
     def catalog_options(self, category: str) -> list[str] | None:
-        """Only the checkpoints this node can actually load.
-
-        Matched on the safetensors header, not the filename, because `diffusion_models/` is shared
-        across architectures and a file can be renamed. The pruned and ComfyUI-quantised builds are
-        excluded here; ``rejected()`` explains why so the UI can say it rather than hiding them.
-        """
+        """This partition's loadable checkpoints; ``rejected()`` says why a file is left out."""
+        # Offered first, the other partition's file was picked silently by the UI.
         if category != "diffusion_models":
             return None
-        return [path.name for path in reqs.usable_transformers()]
+        return [path.name for path in reqs.usable_transformers(self._partition)]
 
     def rejected(self) -> list[dict[str, str]]:
         """H3 files that are present but unusable, each with the reason."""
@@ -65,7 +61,7 @@ class MiniMaxH3Provider:
         ]
 
     def estimate(self, policy: Any) -> dict[str, Any] | None:
-        """Whether this will fit, before a 124 GB download rather than after.
+        """Whether this will fit, before a 40 GB download rather than after.
 
         Peak is staged, not the sum of every component: the prompt is encoded first and the encoder
         freed before the transformer loads, which is what `pipeline_runtime` already does for

@@ -22,12 +22,16 @@ from safetensors import safe_open
 
 from ...errors import ComponentError
 from .. import lora as lora_module
+from ..checkpoint import CheckpointReader
+from ..comfy_int8 import SCALE_SUFFIX, Int8Spec, int8_layers_of
+from ..int8_linear import load_scale, swap_linears
 from ..keymap import (
     AssertEqual,
     Rename,
     RowLayout,
     Split,
     SwapHalves,
+    assert_layout,
     detect_row_layout,
     row_stats,
     transform,
@@ -159,8 +163,17 @@ def load_transformer(
             num_refiner_blocks=int(model.config.num_refiner_layers),
             head_dim=int(model.config.attention_head_dim),
         )
+        int8 = int8_layers_of(CheckpointReader(path), path.name)
+        int8_scales = {
+            f"{layer}.weight": load_scale(
+                handle.get_tensor(layer + SCALE_SUFFIX),
+                handle.get_slice(f"{layer}.weight").get_shape()[0],
+            )
+            for layer in int8
+        }
         measured = layout or detect_source_layout(
-            handle.get_tensor(_PROBE_KEY), head_dim=geometry["head_dim"]
+            _real_rows(handle.get_tensor(_PROBE_KEY), int8_scales.get(_PROBE_KEY)),
+            head_dim=geometry["head_dim"],
         )
         logger.info("MiniMax H3 checkpoint %s: QKV rows are %s", path.name, measured.value)
         # The pruned builds ship no timestep path at all, so the modules the table feeds have to be
@@ -169,7 +182,7 @@ def load_transformer(
         scales = {
             f"{k[: -len(_SCALE_SUFFIX)]}.weight": handle.get_tensor(k)
             for k in source_keys
-            if k.endswith(_SCALE_SUFFIX)
+            if k.endswith(_SCALE_SUFFIX) and k[: -len(_SCALE_SUFFIX)] not in int8
         }
         if scales:
             logger.info(
@@ -184,9 +197,15 @@ def load_transformer(
             _source_for(measured), pruned=pruned, sidecars=sidecars, **geometry
         )
         _check_plan(plan, source_keys, model, pruned=pruned)
+        if int8:
+            # After the coverage check, which is phrased in the plan's ``.weight`` targets.
+            swap_linears(model, _int8_targets(plan, int8), dtype)
+            logger.info(
+                "MiniMax H3 %s is a ComfyUI int8 build: %d layers stay int8", path.name, len(int8)
+            )
         filled = _stream_into(
             model, handle, plan, dtype=dtype, device=device, shrink=shrink, pruned=pruned,
-            scales=scales,
+            scales=scales, int8_scales=int8_scales,
         )
 
     if lora_plan:
@@ -195,7 +214,7 @@ def load_transformer(
         # else, so a run with no adapter and a run with one that never arrived look identical in
         # the log, and the only way to tell them apart was to render twice and compare.
         logger.info(
-            "MiniMax H3: fused %d LoRA layer(s) from %s",
+            "MiniMax H3: applied %d LoRA layer(s) from %s (live adapters on int8 layers)",
             len(lora_plan),
             ", ".join(f"{Path(ref.file).name}@{ref.strength:g}" for ref in loras),
         )
@@ -304,6 +323,22 @@ def _finish_fuse(model: Any, plan: Any, fused: set[str]) -> None:
         )
 
 
+def _real_rows(tensor: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
+    """Rows at their real magnitude; ConvRot is orthonormal, so row norms survive it unrotated."""
+    return tensor if scale is None else tensor.float() * scale
+
+
+def _int8_targets(plan: Any, int8: dict[str, Int8Spec]) -> dict[str, Int8Spec]:
+    """The port's module for each int8 source layer, after renames and QKV splits."""
+    out: dict[str, Int8Spec] = {}
+    for layer, spec in int8.items():
+        action = plan.actions[f"{layer}.weight"]
+        targets = action.targets if isinstance(action, Split) else (action.target,)
+        for target in targets:
+            out[target.removesuffix(".weight")] = spec
+    return out
+
+
 def _source_for(layout: RowLayout) -> str:
     for name, known in h3keys.SOURCE_LAYOUTS.items():
         if known is layout:
@@ -330,6 +365,7 @@ def _stream_into(
     shrink: Any = None,
     pruned: bool = False,
     scales: dict[str, torch.Tensor] | None = None,
+    int8_scales: dict[str, torch.Tensor] | None = None,
 ) -> set[str]:
     """Place every tensor, optionally shrinking each transformer block as soon as it is complete.
 
@@ -353,16 +389,36 @@ def _stream_into(
         source = handle.get_tensor(key)
         if scales and (scale := scales.get(key)) is not None:
             source = source.to(torch.float32) * scale.to(torch.float32)
-        for target, value in transform(key, source, action):
+        placed: list[tuple[str, torch.Tensor]]
+        if int8_scales and (scale := int8_scales.get(key)) is not None:
+            placed = list(_int8_pieces(key, source, scale, action))
+        else:
+            placed = [(t, v.to(dtype=dtype)) for t, v in transform(key, source, action)]
+        for target, value in placed:
             block = _block_prefix(target)
             if shrink is not None and pending is not None and block != pending:
                 shrink(model, pending)
             pending = block if shrink is not None else None
-            _assign(model, target, value.to(dtype=dtype, device=device))
+            _assign(model, target, value.to(device=device))
             filled.add(target)
     if shrink is not None and pending is not None:
         shrink(model, pending)
     return filled
+
+
+def _int8_pieces(
+    key: str, codes: torch.Tensor, scale: torch.Tensor, action: Any
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """An int8 weight's codes and scales through the same row transform, as the swapped buffers."""
+    if isinstance(action, Split):
+        # Measured on real magnitudes: every row of the raw codes peaks near 127, which hides it.
+        assert_layout(_real_rows(codes, scale), action, key=key)
+    weights = transform(key, codes, action, verify_layout=False)
+    scales = transform(key, scale, action, verify_layout=False)
+    for (target, value), (_, row_scale) in zip(weights, scales, strict=True):
+        layer = target.removesuffix(".weight")
+        yield f"{layer}.qweight", value.contiguous()
+        yield f"{layer}.weight_scale", row_scale.contiguous()
 
 
 def _block_prefix(key: str) -> str | None:

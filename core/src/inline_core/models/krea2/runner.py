@@ -32,6 +32,7 @@ from ...runtime.progress import Phase
 from ...runtime.store import TakeStore
 from .. import loaders
 from .. import pipeline_runtime as rt
+from ..comfy_int8 import quantization_for
 from ..sampling import SamplingFamily, apply_sampling, sampling_param_fields
 from . import depth_control as dc
 from . import requirements as reqs
@@ -219,7 +220,7 @@ class Krea2Runner(NodeRunner):
                 source=source,
                 vae=vae_file,
                 text=te_file,
-                quant=self._policy.quantization(),
+                quant=quantization_for(source, self._policy.quantization()),
                 loras=loras,
                 controlnet=control_file,
                 cancel_check=lambda: rt.raise_if_cancelled(ctx),

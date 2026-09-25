@@ -365,6 +365,52 @@ def test_an_fp8_weight_is_dequantised_by_its_scale(reference, tmp_path: Path) ->
     assert torch.equal(loaded.transformer_blocks[0].ff.net[2].weight, codes * 0.25)
 
 
+def _comfy_int8(weight: torch.Tensor, groupsize: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """comfy-kitchen's convrot weight quantiser, restated: rotate, then per-row absmax / 127."""
+    from inline_core.models.int8_linear import hadamard
+
+    rows, cols = weight.shape
+    if groupsize:
+        h = hadamard(groupsize, weight.device, torch.float32)
+        weight = (weight.float().reshape(rows, cols // groupsize, groupsize) @ h.T).reshape(
+            rows, cols
+        )
+    scale = (weight.abs().amax(dim=1, keepdim=True).float() / 127.0).clamp(min=1e-30)
+    return (weight / scale).round().clamp(-128, 127).to(torch.int8), scale
+
+
+@pytest.mark.parametrize("layout", [RowLayout.CONTIGUOUS, RowLayout.INTERLEAVED])
+def test_a_comfy_int8_build_loads_as_int8_with_every_row_where_it_belongs(  # type: ignore[no-untyped-def]
+    reference, tmp_path: Path, layout: RowLayout
+) -> None:
+    """The QKV split, the FFN half swap and the de-interleave must move each scale with its row."""
+    import json
+
+    from inline_core.models.comfy_int8 import Int8Spec
+    from inline_core.models.int8_linear import ComfyInt8Linear, quantize
+
+    path, state = reference(layout)
+    tensors = dict(load_file(str(path)))
+    quantised = [k for k in tensors if k.endswith(("qkv_proj.weight", "mlp.fc1.weight"))]
+    for key in quantised:
+        layer = key.removesuffix(".weight")
+        tensors[key], tensors[f"{layer}.weight_scale"] = quantize(tensors[key], Int8Spec(16))
+        marker = {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 16}
+        tensors[f"{layer}.comfy_quant"] = torch.tensor(list(json.dumps(marker).encode()),
+                                                       dtype=torch.uint8)
+    loaded = load_transformer(_write(tmp_path / "h3_int8.safetensors", tensors),
+                              dtype=torch.float32)
+
+    block = loaded.transformer_blocks[0]
+    assert isinstance(block.attn.to_k, ComfyInt8Linear)
+    assert block.attn.to_k.qweight.dtype is torch.int8
+    for name in ("attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj"):
+        want = state[f"transformer_blocks.0.{name}.weight"]
+        got = block.get_submodule(name).weight
+        step = want.abs().amax(dim=1, keepdim=True) / 127
+        assert ((got - want).abs() <= 2 * step).all(), name
+
+
 def test_the_fp8_plan_is_versioned_apart() -> None:
     plain = h3keys.build_plan("comfy-org", **TINY_PLAN).version
     fp8 = h3keys.build_plan(

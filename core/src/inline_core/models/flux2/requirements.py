@@ -251,12 +251,24 @@ def skip_reason(path: Path) -> str:
     blocked = V.single_file_blocker(path)
     if blocked is not None:
         return f"{blocked}, so diffusers cannot convert it"
+    if path.suffix.lower() == ".gguf":
+        return "unrecognised GGUF build"
+    if not _has_flux_blocks(path):
+        # Other families share this folder; calling their files FLUX.2 repacks sent users hunting.
+        return "not a FLUX.2 checkpoint"
     carried = V.quantization_of(path)
     if carried is not None:
         return f"a {carried} repack whose tensor names we do not recognise"
-    if path.suffix.lower() == ".gguf":
-        return "unrecognised GGUF build"
-    return "not a FLUX.2 checkpoint, or a repack whose tensor names we do not recognise"
+    return "a FLUX-shaped checkpoint whose tensor names or shapes we do not recognise"
+
+
+def _has_flux_blocks(path: Path) -> bool:
+    """Double- and single-stream blocks under either naming; H3, LTX and the rest lack one side."""
+    keys = V._shapes_of(path) or {}  # pyright: ignore[reportPrivateUsage]
+    double = any(".double_blocks." in f".{k}" or ".transformer_blocks." in f".{k}" for k in keys)
+    single = any(".single_blocks." in f".{k}" or ".single_transformer_blocks." in f".{k}"
+                 for k in keys)
+    return double and single
 
 
 def flux2_encoders() -> list[Path]:

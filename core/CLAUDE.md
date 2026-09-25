@@ -202,6 +202,10 @@ between nodes and are never takes.
   (`flux2/variants.is_prequantized`) has an on-disk size that already _is_ its resident size, so the
   ladder's assumption that quantization halves it does not hold, and handing diffusers a second,
   different quantization config is a hard error. Pass `Quantization.NONE` for those.
+- **ComfyUI int8 (`int8_tensorwise`, with or without ConvRot) runs as stored.** `models/comfy_int8.py`
+  recognises it from the header, and `models/int8_linear.py` runs it as comfy-kitchen does, with int8
+  weights, per-row int8 activations, and the Hadamard rotation applied to the activation. It is a prequantized source, so no second quantization and no structural
+  transform; a LoRA rides as a live adapter (LTX's fuse rule re-quantizes instead, as ComfyUI does).
 - **Staged loading** - when the text encoder and the transformer cannot be co-resident (dev is a
   15 GB encoder beside an 18 GB transformer), the prompt is encoded first and the encoder freed before
   the transformer loads. The decision has to be made _before_ the load: by the time an OOM fires there

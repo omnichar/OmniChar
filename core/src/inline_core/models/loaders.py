@@ -37,6 +37,7 @@ from ..config import data_dir
 from ..device.policy import Quantization
 from ..errors import ComponentError
 from . import checkpoint
+from .comfy_int8 import is_int8_file
 
 logger = logging.getLogger("inline_core.loaders")
 
@@ -568,6 +569,10 @@ def load_diffusion(
         from diffusers import ZImageTransformer2DModel
 
         root = ensure_assets(arch)
+        if is_int8_file(file):
+            return _int8_transformer(
+                ZImageTransformer2DModel, file, root, dtype, device, loras, subfolder="transformer"
+            )
         model = ZImageTransformer2DModel.from_single_file(
             file,
             config=str(root),
@@ -724,6 +729,14 @@ def load_text_encoder(
         from transformers import AutoTokenizer, Qwen3Model
 
         root = ensure_assets(arch)
+        tokenizer = AutoTokenizer.from_pretrained(str(root / "tokenizer"), local_files_only=True)
+        if is_int8_file(file):
+            from .int8_single_file import load_encoder
+
+            text_encoder = load_encoder(
+                Qwen3Model, file, config=str(root / "text_encoder"), dtype=dtype, device=device
+            )
+            return text_encoder, tokenizer
         weights_dir = _staged_encoder_dir(arch, file)
         device_map = {"": device} if device else None
         # A repack that already carries its own scales must not be quantized again, and transformers
@@ -753,7 +766,6 @@ def load_text_encoder(
                 "its scales are not part of the stock Qwen3 layout. Use the full-precision encoder "
                 "(qwen_3_8b.safetensors from Comfy-Org/flux2-klein-9B)."
             ) from error
-        tokenizer = AutoTokenizer.from_pretrained(str(root / "tokenizer"), local_files_only=True)
         return text_encoder, tokenizer
 
     return _cached(
@@ -928,6 +940,8 @@ def load_krea2_transformer(
 
         from . import lora as lora_module
         from .checkpoint import CheckpointReader
+        from .comfy_int8 import SCALE_SUFFIX, int8_layers_of
+        from .int8_linear import load_scale, swap_linears
         from .krea2 import convert
 
         with torch.device("meta"):
@@ -954,17 +968,27 @@ def load_krea2_transformer(
 
         with CheckpointReader(file) as handle:
             keys = handle.keys()
-            convert.check_loadable(keys, expected)
+            int8 = int8_layers_of(handle, Path(file).name)
+            convert.check_loadable(keys, expected, int8)
             sources = {convert.convert_key(key): key for key in keys}
+            if int8:
+                # The rename is 1:1, so a layer's codes and scale keep their source's module path.
+                targets = {convert.convert_key(f"{k}.weight").removesuffix(".weight"): v
+                           for k, v in int8.items()}
+                swap_linears(model, targets, dtype)
+                for layer in targets:
+                    sources[f"{layer}.qweight"] = sources.pop(f"{layer}.weight")
             for prefix, chunk in _krea2_chunks(model):
                 chunk.to_empty(device=staging)
                 for name, target in _named_tensors(chunk, prefix):
                     source = handle.get_tensor(sources[name], device=staging)
+                    if name.endswith(SCALE_SUFFIX) and int8:
+                        source = load_scale(source, target.shape[0])
                     target.data.copy_(source.reshape(target.shape).to(target.dtype))
                 # Fuse before quantizing: the fuse adds a full-precision delta that quantized
                 # weights cannot accept in place.
                 lora_module.apply_plan(chunk, plan, f"{prefix}.")
-                _quantize_chunk(chunk, quant, target_device)
+                _quantize_chunk(chunk, Quantization.NONE if int8 else quant, target_device)
         return model
 
     key = (
@@ -1236,6 +1260,28 @@ def _transformer_config_dir(
     return stage
 
 
+def _int8_transformer(
+    cls: Any,
+    file: str,
+    root: Path,
+    dtype: Any,
+    device: str | None,
+    loras: tuple[LoraRef, ...],
+    subfolder: str | None = None,
+) -> Any:
+    """A ComfyUI int8 build: codes stay int8, so no quantization, and LoRAs ride as adapters."""
+    from .int8_single_file import load_single_file
+
+    model = load_single_file(
+        cls, file, config=str(root), dtype=dtype, device=device, subfolder=subfolder
+    )
+    if loras:
+        from .lora import fuse_loras
+
+        fuse_loras(model, loras)
+    return model
+
+
 def _is_gguf(file: str) -> bool:
     return Path(file).suffix.lower() == ".gguf"
 
@@ -1286,6 +1332,8 @@ def load_flux1_transformer(
             )
 
         root = _transformer_config_dir(arch, file, config, "FluxTransformer2DModel")
+        if is_int8_file(file):
+            return _int8_transformer(FluxTransformer2DModel, file, root, dtype, device, loras)
         kwargs: dict[str, Any] = {}
         if _is_gguf(file):
             kwargs["quantization_config"] = _gguf_config(dtype)
@@ -1484,6 +1532,8 @@ def load_flux2_transformer(
             )
 
         root = _transformer_config_dir(arch, file, config, "Flux2Transformer2DModel")
+        if is_int8_file(file):
+            return _int8_transformer(Flux2Transformer2DModel, file, root, dtype, device, loras)
         kwargs: dict[str, Any] = {}
         if _is_gguf(file):
             kwargs["quantization_config"] = _gguf_config(dtype)

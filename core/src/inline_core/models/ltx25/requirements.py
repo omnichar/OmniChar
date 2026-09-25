@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ...config import models_dir
+from ..comfy_int8 import is_comfy_int8
 from ..requirements import ModelComponent
 
 #: Lightricks publish the whole split pack in one repo, laid out as ComfyUI's category folders,
@@ -70,7 +71,7 @@ KIND_TEXT_ENCODER = "text_encoder"
 #: NVFP4 stores packed U8 weights beside an F8_E4M3 block scale and an F32 global scale, 1:1:1.
 _NVFP4_WEIGHT_DTYPE = "U8"
 _NVFP4_SCALE_DTYPE = "F8_E4M3"
-#: ComfyUI's int8 build stores its weights rotated (convrot), which is a transform we cannot invert.
+#: ComfyUI's int8 build; its transformer runs natively, its Gemma encoder is not readable yet.
 _INT8_DTYPE = "I8"
 
 
@@ -82,7 +83,7 @@ class Candidate:
     #: ``KIND_TRANSFORMER``, ``KIND_TEXT_ENCODER``, or "" when this is not an LTX component.
     kind: str = ""
     version: tuple[int, ...] = ()
-    #: "", "nvfp4" or "int8". Read from the weight dtypes, not from the filename.
+    #: "", "nvfp4", "int8" or "unknown". Read from the weight dtypes, not from the filename.
     quantisation: str = ""
 
     @property
@@ -91,7 +92,10 @@ class Candidate:
 
     @property
     def usable(self) -> bool:
-        if not self.is_ltx or self.quantisation == "int8":
+        if not self.is_ltx or self.quantisation == "unknown":
+            return False
+        # Unlike the transformer's, the vendored Gemma loader has no hook to keep int8 Linears.
+        if self.quantisation == "int8" and self.kind == KIND_TEXT_ENCODER:
             return False
         # The packed text encoder declares no ``model_version`` at all; being the LTX-specific
         # Gemma build is its whole identity, and ``_kind`` has already established that.
@@ -107,15 +111,12 @@ class Candidate:
         if not self.is_ltx:
             return "not an LTX component"
         if self.quantisation == "int8":
-            alternative = (
-                "The bf16 and NVFP4 builds both load."
-                if self.kind == KIND_TRANSFORMER
-                else "The bf16 text encoder loads."
-            )
             return (
-                "a ComfyUI int8 build: its weights are stored rotated (convrot), which is a "
-                f"transform only ComfyUI can invert. {alternative}"
+                "a ComfyUI int8 text encoder, which LTX's Gemma loader cannot read yet. The bf16 "
+                "text encoder loads."
             )
+        if self.quantisation == "unknown":
+            return "int8 weights without ComfyUI's marker, so there is no recipe to read them by"
         version = ".".join(str(part) for part in self.version) or "unknown"
         return f"LTX {version}, older than the 2.5 these nodes need"
 
@@ -241,9 +242,10 @@ def _quantisation(header: dict[str, object]) -> str:
     the U8 dtype alone, because U8 on its own carries no recipe and reading quantised weights with
     the wrong one renders a plausible wrong video instead of raising.
     """
-    dtypes = {str(info.get("dtype")) for _, info in _entries(header)}
+    by_key = {name: str(info.get("dtype")) for name, info in _entries(header)}
+    dtypes = set(by_key.values())
     if _INT8_DTYPE in dtypes:
-        return "int8"
+        return "int8" if is_comfy_int8(by_key) else "unknown"
     if _NVFP4_WEIGHT_DTYPE in dtypes and _NVFP4_SCALE_DTYPE in dtypes:
         names = {name for name, _ in _entries(header)}
         if any(f"{n.removesuffix('.weight')}.weight_scale" in names for n in names if

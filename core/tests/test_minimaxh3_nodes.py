@@ -299,8 +299,8 @@ def test_a_pruned_fp8_build_is_accepted(models_root: Path) -> None:
     assert candidate.reason == ""
 
 
-def test_an_int8_convrot_build_is_still_rejected(models_root: Path) -> None:
-    """The rotation is the part we cannot invert, and inverting it wrongly still renders."""
+def test_an_int8_convrot_build_is_offered(models_root: Path) -> None:
+    """ComfyUI's int8 runs natively, so it is offered like the fp8 build."""
     path = _fake_checkpoint(
         models_root / "diffusion_models" / "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         {
@@ -311,8 +311,19 @@ def test_an_int8_convrot_build_is_still_rejected(models_root: Path) -> None:
         dtypes={"blocks.0.attn.qkv_proj.weight": "I8"},
     )
     candidate = reqs.inspect_file(path)
-    assert candidate.is_h3 and not candidate.usable
-    assert "convrot" in candidate.reason
+    assert candidate.usable and candidate.quantisation == "int8"
+    assert candidate.reason == ""
+
+
+def test_int8_without_a_comfy_marker_is_refused(models_root: Path) -> None:
+    """Bare int8 carries no recipe to read it by, so it is named unknown and refused."""
+    path = _fake_checkpoint(
+        models_root / "diffusion_models" / "minimax_h3_mystery_int8.safetensors",
+        _H3_PROBE,
+        dtypes={"blocks.0.attn.qkv_proj.weight": "I8"},
+    )
+    assert reqs.inspect_file(path).quantisation == "unknown"
+    assert not reqs.inspect_file(path).usable
 
 
 def test_an_unrecognised_quantisation_is_refused_rather_than_guessed(models_root: Path) -> None:
@@ -324,14 +335,15 @@ def test_an_unrecognised_quantisation_is_refused_rather_than_guessed(models_root
     assert not reqs.inspect_file(path).usable
 
 
-def test_the_comfy_int8_build_is_rejected_with_a_reason(models_root: Path) -> None:
+def test_an_int8_build_is_sized_at_a_byte_per_quantised_param(models_root: Path) -> None:
+    """Its codes are never unpacked, so sizing them as bf16 would double what it places."""
     path = _fake_checkpoint(
         models_root / "diffusion_models" / "minimax_h3_fl2va_int8_convrot.safetensors",
         {**_H3_PROBE, "blocks.0.attn.qkv_proj.comfy_quant": [72]},
+        dtypes={"blocks.0.attn.qkv_proj.weight": "I8"},
     )
-    candidate = reqs.inspect_file(path)
-    assert candidate.is_h3 and not candidate.usable
-    assert "only ComfyUI" in candidate.reason
+    rows, cols = _H3_PROBE["blocks.0.attn.qkv_proj.weight"]
+    assert reqs.resident_bytes(path) == rows * cols + 72 * 2
 
 
 def test_the_picker_offers_the_usable_file_and_explains_the_rest(models_root: Path) -> None:

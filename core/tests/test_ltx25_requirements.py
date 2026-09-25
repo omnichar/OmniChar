@@ -111,18 +111,32 @@ def test_an_nvfp4_transformer_is_recognised_by_its_paired_scales(models_root: Pa
     assert candidate.usable
 
 
-def test_the_comfy_int8_build_is_refused_with_a_reason(models_root: Path) -> None:
+def test_the_comfy_int8_transformer_is_offered(models_root: Path) -> None:
+    """Its int8 Linears run natively, so the picker offers it like any other build."""
     path = write_safetensors(
         models_root / "diffusion_models" / "ltx-2.5-distilled-comfy-int8-convrot.safetensors",
+        {
+            "blocks.0.attn1.to_q.weight": tensor("I8", [4096, 4096]),
+            "blocks.0.attn1.to_q.weight_scale": tensor("F32", [4096, 1]),
+            "blocks.0.attn1.to_q.comfy_quant": tensor("U8", [70]),
+        },
+        transformer_meta(),
+    )
+    candidate = reqs.inspect_file(path)
+    assert candidate.usable and candidate.quantisation == "int8"
+    assert reqs.rejected_files() == []
+    assert path.name in [p.name for p in reqs.usable_transformers()]
+
+
+def test_int8_without_a_comfy_marker_is_refused(models_root: Path) -> None:
+    path = write_safetensors(
+        models_root / "diffusion_models" / "ltx-2.5-mystery-int8.safetensors",
         {"blocks.0.attn1.to_q.weight": tensor("I8", [4096, 4096])},
         transformer_meta(),
     )
     candidate = reqs.inspect_file(path)
-    assert candidate.is_ltx
-    assert not candidate.usable
-    assert "convrot" in candidate.reason
-    assert [c.path.name for c in reqs.rejected_files()] == [path.name]
-    assert path.name not in [p.name for p in reqs.usable_transformers()]
+    assert candidate.quantisation == "unknown" and not candidate.usable
+    assert "marker" in candidate.reason
 
 
 def test_an_older_ltx_generation_is_refused(models_root: Path) -> None:
@@ -207,17 +221,19 @@ def test_every_component_lands_in_a_category_the_catalog_scans(models_root: Path
 
 
 def test_the_convrot_text_encoder_is_refused_too(models_root: Path) -> None:
-    """Upstream ships an int8 build of the Gemma 4 encoder as well, and a rejection scan that only
-    looked at `diffusion_models/` would stay silent about it."""
+    """LTX's Gemma loader cannot keep int8 Linears, so the rejection scan names this file."""
     path = write_safetensors(
         models_root / "text_encoders" / "gemma4-12b-ltx-2.5-comfy-int8-convrot.safetensors",
-        {"model.layers.0.self_attn.q_proj.weight": tensor("I8", [4096, 4096])},
+        {
+            "model.layers.0.self_attn.q_proj.weight": tensor("I8", [4096, 4096]),
+            "model.layers.0.self_attn.q_proj.comfy_quant": tensor("U8", [70]),
+        },
         text_encoder_meta(),
     )
     candidate = reqs.inspect_file(path)
     assert candidate.kind == reqs.KIND_TEXT_ENCODER
     assert not candidate.usable
-    assert "convrot" in candidate.reason
+    assert "Gemma loader" in candidate.reason
     assert [c.path.name for c in reqs.rejected_files()] == [path.name]
 
 

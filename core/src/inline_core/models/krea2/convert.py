@@ -14,7 +14,7 @@ Torch-free apart from the tensors handed in, so it is cheap to import and easy t
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from ...errors import ComponentError
@@ -83,17 +83,18 @@ def is_quantized_checkpoint(keys: Any) -> bool:
     return any(str(k).endswith(_QUANT_MARKERS) for k in keys)
 
 
-def check_loadable(keys: Any, expected: set[str]) -> None:
+def check_loadable(keys: Any, expected: set[str], int8: Collection[str] = ()) -> None:
     """Refuse a checkpoint that would only partially load, before any tensor is read.
 
     Key-only so the streaming loader can validate up front; a partial load would otherwise leave
     random-initialised layers and produce quietly wrong images instead of an error."""
-    keys = list(keys)
+    # ComfyUI int8 layers' scales and markers are the only quantisation tensors that load.
+    sidecars = {f"{layer}{end}" for layer in int8 for end in (".weight_scale", ".comfy_quant")}
+    keys = [k for k in keys if k not in sidecars]
     if is_quantized_checkpoint(keys):
         raise ComponentError(
-            "This is a ComfyUI quantized Krea 2 build (fp8 / int8 / nvfp4), which only ComfyUI can "
-            "read. Use krea2_raw_bf16.safetensors or krea2_turbo_bf16.safetensors - smart memory "
-            "quantizes it for your GPU on load."
+            "This is a ComfyUI fp8 or nvfp4 quantized Krea 2 build, which only ComfyUI can read. "
+            "Use the bf16 or int8 build - smart memory quantizes bf16 for your GPU on load."
         )
     converted = {convert_key(k): k for k in keys}
     unknown = sorted(original for name, original in converted.items() if name not in expected)

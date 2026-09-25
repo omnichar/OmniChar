@@ -84,7 +84,11 @@ def apply_plan(module: Any, plan: LoraPlan, prefix: str = "") -> None:
             continue
         with torch.no_grad():
             for down, up, scale in deltas:
-                _add_delta(child.weight, up, down, scale)
+                # A ComfyUI int8 layer: codes cannot absorb a delta, and its ``weight`` is a copy.
+                if hasattr(child, "add_adapter"):
+                    child.add_adapter(down, up, scale)
+                else:
+                    _add_delta(child.weight, up, down, scale)
 
 
 def _plan_one(
@@ -208,6 +212,7 @@ def _linear_module_names(model: Any) -> dict[str, None]:
         name: None
         for name, module in model.named_modules()
         if isinstance(module, torch.nn.Linear | torch.nn.Conv2d | torch.nn.Conv3d)
+        or hasattr(module, "add_adapter")
     }
 
 

@@ -115,7 +115,7 @@ What has been run, and what has a code path nobody has verified:
 | ----------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | **NVIDIA, Linux**       | **Tested**, Z-Image Turbo 1024² on a T4 (16GB); Krea 2 1024² and LoRA training on an L40S (48GB) | None                                                                                           |
 | **NVIDIA, Windows**     | Supported                                                                                        | PyPI's default torch is CPU-only on Windows, so `--install` picks the CUDA build for your card |
-| **Apple Silicon (MPS)** | Code path exists, **untested**                                                                   | None. int8 does not apply on MPS, so a model too big for unified memory will not fit           |
+| **Apple Silicon (MPS)** | Code path exists, **untested**                                                                   | None. No on-load int8 on MPS, so size to unified memory; ComfyUI int8 files still load         |
 | **AMD (ROCm), Linux**   | **Untested**, reports welcome                                                                    | Needs a ROCm build of PyTorch, see below                                                       |
 | **CPU only**            | Works, very slow                                                                                 | `./webui.sh --cpu`                                                                             |
 
@@ -292,10 +292,12 @@ diffusion model, VAE and text encoder with visible progress. Nothing is fetched 
 <summary><b>Model files: what goes where</b></summary>
 
 Most builds load. For MiniMax H3 that means the full **bf16** file, the **pruned** build, and the
-**fp8_scaled** build, which is the same model at 21.0GB instead of 66.3GB. The `int8_convrot`,
-`mxfp8` and `nvfp4` files do not: their weights are stored rotated, and that is a transform only
-ComfyUI can undo. A build the node cannot read is listed along with the reason, and a quantisation
-it does not recognise is refused rather than guessed at.
+**fp8_scaled** build, which is the same model at 21.0GB instead of 66.3GB. The `mxfp8` and `nvfp4`
+H3 transformers do not load. A build the node cannot read is listed along with the reason, and a
+quantisation it does not recognise is refused rather than guessed at.
+
+**ComfyUI int8 support.** The `int8_convrot` and `int8_tensorwise` files you use in ComfyUI load
+here unchanged and stay int8 in VRAM, about half their bf16 size.
 
 A smaller file downloads faster, but it does not use less VRAM. Fitting the model to your card is
 the device policy's job whichever build you start from.

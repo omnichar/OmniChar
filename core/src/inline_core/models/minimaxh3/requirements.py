@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ...config import models_dir
+from ..comfy_int8 import is_comfy_int8
 from ..requirements import ModelComponent
 
 #: Both partitions are published by Comfy-Org as one consolidated file each.
@@ -48,9 +49,7 @@ _PROBE_SHAPE = [21504, 5376]
 _PRUNED_MARKER = "adaln_t_table"
 #: ComfyUI's own quantisation, which carries scale tensors alongside the weights.
 _COMFY_QUANT_SUFFIX = ".comfy_quant"
-#: The quantised dtypes the published builds use, and whether the loader can read one.
-#: fp8 is a scalar scale per weight and nothing else, so it dequantises exactly. int8 is only
-#: published with ComfyUI's rotation applied, which is a transform we cannot invert.
+#: The quantised dtypes the published builds use: fp8 dequantises on load, int8 runs as stored.
 _FP8_DTYPE = "F8_E4M3"
 _INT8_DTYPE = "I8"
 
@@ -63,12 +62,12 @@ class Candidate:
     is_h3: bool
     pruned: bool = False
     comfy_quantised: bool = False
-    #: "", "float8_e4m3fn" or "int8". Read from the weight dtypes, not from the filename.
+    #: "", "float8_e4m3fn", "int8" or "unknown". Read from the weight dtypes, not the filename.
     quantisation: str = ""
 
     @property
     def usable(self) -> bool:
-        return self.is_h3 and self.quantisation in ("", "float8_e4m3fn")
+        return self.is_h3 and self.quantisation in ("", "float8_e4m3fn", "int8")
 
     @property
     def reason(self) -> str:
@@ -79,11 +78,6 @@ class Candidate:
             return ""
         if not self.is_h3:
             return "not a MiniMax H3 transformer"
-        if self.quantisation in ("int8", "unknown"):
-            return (
-                "a ComfyUI int8 build: its weights are stored rotated (convrot), which is a "
-                "transform only ComfyUI can invert. The fp8 build is the same size and loads."
-            )
         if self.quantisation:
             return f"quantised as {self.quantisation}, which this node cannot read"
         return ""
@@ -139,7 +133,7 @@ def _inspect_cached(path_str: str, mtime: int, size: int) -> Candidate:
     is_h3 = isinstance(probe, dict) and list(probe.get("shape", [])) == _PROBE_SHAPE
     if not is_h3:
         return Candidate(path, is_h3=False)
-    dtypes = {str(info.get("dtype")) for _, info in _entries(header)}
+    dtypes = {name: str(info.get("dtype")) for name, info in _entries(header)}
     return Candidate(
         path,
         is_h3=True,
@@ -149,15 +143,13 @@ def _inspect_cached(path_str: str, mtime: int, size: int) -> Candidate:
     )
 
 
-def _quantisation(dtypes: set[str], has_sidecars: bool) -> str:
-    """What a build is quantised as, refusing anything unrecognised rather than guessing.
-
-    A ``comfy_quant`` sidecar in a format we do not know is named ``unknown`` and refused: reading
-    quantised weights with the wrong recipe renders a plausible wrong video, not an error."""
-    if _FP8_DTYPE in dtypes:
+def _quantisation(dtypes: dict[str, str], has_sidecars: bool) -> str:
+    """What a build is quantised as; ``unknown`` is refused, since a wrong recipe renders anyway."""
+    kinds = set(dtypes.values())
+    if _FP8_DTYPE in kinds:
         return "float8_e4m3fn"
-    if _INT8_DTYPE in dtypes:
-        return "int8"
+    if _INT8_DTYPE in kinds:
+        return "int8" if is_comfy_int8(dtypes) else "unknown"
     return "unknown" if has_sidecars else ""
 
 
@@ -352,8 +344,9 @@ def _folder(
 #: under half that.
 ADALN_SHARE = 0.392
 
-#: What the model weighs once loaded, always bf16 whatever the file holds.
+#: What a parameter weighs once loaded: bf16, except ComfyUI int8 codes, which stay int8.
 _RESIDENT_BYTES_PER_PARAM = 2
+_RESIDENT_BYTES_INT8 = 1
 
 
 def resident_bytes(path: Path) -> int:
@@ -375,7 +368,8 @@ def resident_bytes(path: Path) -> int:
         count = 1
         for dim in cast("list[Any]", shape):
             count *= int(dim)
-        total += count * _RESIDENT_BYTES_PER_PARAM
+        int8 = info.get("dtype") == _INT8_DTYPE
+        total += count * (_RESIDENT_BYTES_INT8 if int8 else _RESIDENT_BYTES_PER_PARAM)
     return total
 
 

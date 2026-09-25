@@ -93,10 +93,10 @@ Override the diffusion source with `INLINE_ZIMAGE_MODEL` (a file or a diffusers 
 components with `INLINE_ZIMAGE_VAE` / `INLINE_ZIMAGE_TEXT_ENCODER`; Krea 2 has the same three under
 `INLINE_KREA2_*`. The engine scans the models dir on start; a node's model pickers list what is present.
 
-**Krea 2 loads from the same ComfyUI single files**, with two constraints worth knowing. Only the
-**bf16** builds in [`Comfy-Org/Krea-2`](https://huggingface.co/Comfy-Org/Krea-2) are loadable: the
-fp8/int8/nvfp4 variants carry ComfyUI-specific scale tensors, and the loader refuses them by name
-rather than failing mid-load. And the **VAE must be the diffusers-format** Qwen-Image file (the
+**Krea 2 loads from the same ComfyUI single files**, with two constraints worth knowing. The
+**bf16** and **int8** builds in [`Comfy-Org/Krea-2`](https://huggingface.co/Comfy-Org/Krea-2) load,
+and int8 layers stay int8 (`models/int8_linear.py`). The fp8 and nvfp4 variants carry scale tensors
+this loader cannot read, so it refuses them by name rather than failing mid-load. And the **VAE must be the diffusers-format** Qwen-Image file (the
 node's popup fetches it from `Qwen/Qwen-Image`), because ComfyUI's copy of the same weights uses a
 module layout diffusers has no converter for. `Krea2Transformer2DModel` has no `from_single_file`, so
 the transformer checkpoint is renamed into diffusers naming on load (`models/krea2/convert.py`) and

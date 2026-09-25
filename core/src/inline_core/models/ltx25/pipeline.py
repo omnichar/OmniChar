@@ -124,7 +124,9 @@ def _plan(policy: DevicePolicy, paths: dict[str, Path], build: str) -> memory.Lt
         )
     )
     fit = policy.fit_estimate()
-    prequantised = reqs.inspect_file(paths["transformer"]).quantisation == "nvfp4"
+    quantisation = reqs.inspect_file(paths["transformer"]).quantisation
+    prequantised = quantisation == "nvfp4"
+    comfy_int8 = quantisation == "int8"
     if prequantised and _capability() < _NVFP4_MIN_CAPABILITY:
         raise ComponentError(
             f"{_LABEL}: this is the NVFP4 build, which needs a Blackwell card and the ltx-kernels "
@@ -143,7 +145,14 @@ def _plan(policy: DevicePolicy, paths: dict[str, Path], build: str) -> memory.Lt
         free_ram_bytes=memory.ram_bytes(policy),
         prequantised=prequantised,
         kernels_available=memory.kernels_available(),
+        comfy_int8=comfy_int8,
     )
+    if plan is None and comfy_int8:
+        raise ComponentError(
+            f"{_LABEL}: the ComfyUI int8 transformer has to fit on the card, because LTX streams "
+            "only bf16 and fp8-cast weights, and this card is too small for it. The bf16 build "
+            "streams."
+        )
     if plan is None:
         raise ComponentError(
             f"{_LABEL} will not run on this machine. Even streaming from disk it needs about 5 GB "

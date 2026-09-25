@@ -210,3 +210,23 @@ def test_footprint_is_a_stat_and_tolerates_absent_files(models: Path) -> None:
         "vae_bytes": 10,
         "controlnet_bytes": 0,
     }
+
+
+def test_another_familys_int8_build_is_not_called_a_flux2_repack(tmp_path: Path) -> None:
+    """The FLUX.2 scan sees every family's files; an H3 int8 build is not a FLUX.2 repack."""
+    from inline_core.models.flux2.requirements import skip_reason
+
+    h3 = _write_header_only(
+        tmp_path / "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        {
+            "blocks.0.attn.qkv_proj.weight": [21504, 5376],
+            "blocks.0.attn.qkv_proj.comfy_quant": [70],
+        },
+    )
+    flux_shaped = _write_header_only(
+        tmp_path / "odd.safetensors",
+        {"double_blocks.0.img_attn.proj.weight": [8, 8], "single_blocks.0.linear2.weight": [8, 8]},
+    )
+
+    assert skip_reason(h3) == "not a FLUX.2 checkpoint"
+    assert "FLUX-shaped" in skip_reason(flux_shaped)

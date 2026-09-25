@@ -137,9 +137,9 @@ def test_the_build_satisfies_the_vendored_depth_guard() -> None:
     if not weights.is_file():
         pytest.skip("nvfp4 conditioner not present")
 
-    from inline_core.models.minimaxh3.pipeline import _load_nvfp4_encoder
+    from inline_core.models.minimaxh3.pipeline import _load_packed_encoder
 
-    model = _load_nvfp4_encoder(weights, torch.bfloat16)
+    model = _load_packed_encoder(weights, torch.bfloat16)
     depth = model.config.text_config.num_hidden_layers
     assert depth > MINIMAX_H3_TEXT_ENCODER_LAYER, "the vendored guard would reject this"
     # The stack really is the file's, whatever the config says: transformers reads the config only
@@ -218,3 +218,68 @@ def test_the_output_is_allocated_once_not_concatenated(monkeypatch) -> None:
     out = layer(torch.randn(1, 256, 64, dtype=torch.float32))
     assert out.shape == (1, 256, 96)
     assert not calls, "the chunks are written into one output, never concatenated"
+
+
+def _int8_encoder_file(tmp_path, *, convrot: bool):  # type: ignore[no-untyped-def]
+    """A two-module stand-in for a ComfyUI int8 conditioner: an embedding table and one Linear."""
+    import json
+
+    from safetensors.torch import save_file
+
+    from inline_core.models.int8_linear import hadamard
+
+    torch.manual_seed(0)
+    table, proj = torch.randn(10, 64), torch.randn(32, 64)
+    tensors = {}
+    marker = {"format": "int8_tensorwise", "convrot": convrot, "convrot_groupsize": 16}
+    for name, weight in (("model.embed_tokens", table), ("model.layers.0.proj", proj)):
+        stored = weight
+        if convrot:
+            h = hadamard(16, torch.device("cpu"), torch.float32)
+            stored = (weight.reshape(len(weight), 4, 16) @ h.T).reshape(weight.shape)
+        scale = stored.abs().amax(dim=1, keepdim=True) / 127
+        tensors[f"{name}.weight"] = (stored / scale).round().clamp(-128, 127).to(torch.int8)
+        tensors[f"{name}.weight_scale"] = scale
+        tensors[f"{name}.comfy_quant"] = torch.tensor(
+            list(json.dumps(marker).encode()), dtype=torch.uint8
+        )
+    path = tmp_path / "encoder_int8_convrot.safetensors"
+    save_file(tensors, str(path))
+    return path, table, proj
+
+
+@pytest.mark.parametrize("convrot", [True, False])
+def test_an_int8_conditioner_keeps_linears_int8_and_unrotates_its_table(  # type: ignore[no-untyped-def]
+    tmp_path, convrot: bool
+) -> None:
+    """A rotated table unpacked without undoing the rotation gives wrong conditioning, no error."""
+    from safetensors import safe_open
+
+    from inline_core.models.checkpoint import CheckpointReader
+    from inline_core.models.int8_linear import ComfyInt8Linear, swap_linears
+    from inline_core.models.minimaxh3 import pipeline as h3
+
+    path, table, proj = _int8_encoder_file(tmp_path, convrot=convrot)
+    language = torch.nn.Module()
+    language.embed_tokens = torch.nn.Embedding(10, 64)
+    language.layers = torch.nn.ModuleList([torch.nn.Module()])
+    language.layers[0].proj = torch.nn.Linear(64, 32, bias=False)
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = language
+    embed, linear = "model.language_model.embed_tokens", "model.language_model.layers.0.proj"
+    sources = {embed: "model.embed_tokens", linear: "model.layers.0.proj"}
+
+    specs = h3._int8_specs(CheckpointReader(path), sources, {embed, linear}, path.name)
+    assert specs == {n: h3.Int8Spec(16 if convrot else 0) for n in (embed, linear)}
+    swap_linears(model, {linear: specs[linear]}, torch.float32)
+    with safe_open(str(path), framework="pt") as handle:
+        h3._unpack_int8(model, handle, sources[embed], embed, specs[embed], torch.float32)
+        h3._load_int8_linears(model, handle, {linear: sources[linear]})
+
+    assert isinstance(model.get_submodule(linear), ComfyInt8Linear)
+    got_table = model.get_submodule(embed).weight
+    assert ((got_table - table).abs() <= table.abs().amax(1, keepdim=True) / 127 * 4).all()
+    x = torch.randn(3, 64)
+    want = x @ proj.T
+    assert (model.get_submodule(linear)(x) - want).norm() / want.norm() < 0.02

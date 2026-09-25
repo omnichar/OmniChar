@@ -71,7 +71,7 @@ KIND_TEXT_ENCODER = "text_encoder"
 #: NVFP4 stores packed U8 weights beside an F8_E4M3 block scale and an F32 global scale, 1:1:1.
 _NVFP4_WEIGHT_DTYPE = "U8"
 _NVFP4_SCALE_DTYPE = "F8_E4M3"
-#: ComfyUI's int8 build; its transformer runs natively, its Gemma encoder is not readable yet.
+#: ComfyUI's int8 build; its transformer runs natively, its Gemma encoder is refused.
 _INT8_DTYPE = "I8"
 
 
@@ -112,8 +112,8 @@ class Candidate:
             return "not an LTX component"
         if self.quantisation == "int8":
             return (
-                "a ComfyUI int8 text encoder, which LTX's Gemma loader cannot read yet. The bf16 "
-                "text encoder loads."
+                "a ComfyUI int8 text encoder, which LTX's Gemma loader cannot read. The bf16 text "
+                "encoder loads."
             )
         if self.quantisation == "unknown":
             return "int8 weights without ComfyUI's marker, so there is no recipe to read them by"

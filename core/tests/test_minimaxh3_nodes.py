@@ -421,14 +421,15 @@ def test_header_reads_are_cached_against_size_and_mtime(models_root: Path) -> No
 
 
 def test_the_reference_node_requires_the_other_partition(models_root: Path) -> None:
-    """Each partition asks only for its own transformer, and asks for the fp8 build by default."""
+    """Each partition asks only for its own transformer, and asks for the int8 build by default."""
     fl2va = {c.id: c for c in MiniMaxH3Provider("fl2va").components()}
     ref2va = {c.id: c for c in MiniMaxH3Provider("ref2va").components()}
-    assert not fl2va["h3-fl2va-fp8"].optional and fl2va["h3-ref2va-fp8"].optional
-    assert not ref2va["h3-ref2va-fp8"].optional and ref2va["h3-fl2va-fp8"].optional
-    # The bf16 builds are the training route, never a second thing to download to render.
+    assert not fl2va["h3-fl2va-int8"].optional and fl2va["h3-ref2va-int8"].optional
+    assert not ref2va["h3-ref2va-int8"].optional and ref2va["h3-fl2va-int8"].optional
+    # bf16 is the training route and fp8 an alternative, never a second thing to download.
     for entries in (fl2va, ref2va):
-        assert entries["h3-fl2va"].optional and entries["h3-ref2va"].optional
+        for other in ("h3-fl2va", "h3-ref2va", "h3-fl2va-fp8", "h3-ref2va-fp8"):
+            assert entries[other].optional, other
 
 
 def test_the_folder_components_declare_a_repo_folder(models_root: Path) -> None:
@@ -538,19 +539,19 @@ class _NullPolicy:
     def fit_estimate(self) -> None: return None
 
 
-def test_generation_asks_for_the_fp8_build_and_training_for_bf16(models_root: Path) -> None:
-    """A third of the download for the same render, and it fits cards that cannot hold the 66.3 GB
-    bf16 at all - so a fresh install should not be told to fetch the big one first. Training still
-    names bf16: fp8 renders, it does not fine-tune."""
+def test_generation_asks_for_the_int8_builds_and_training_for_bf16(models_root: Path) -> None:
+    """A third of the download and it stays int8 in VRAM, so a fresh install fetches it first.
+    Training still names bf16: a pruned build renders, it does not fine-tune."""
     entries = {c.id: c for c in reqs.components("fl2va")}
-    fp8 = entries["h3-fl2va-fp8"]
-    assert not fp8.optional and fp8.filename == reqs.FL2VA_FP8_FILE
-    assert "generation only" in fp8.label
-    assert entries["h3-fl2va"].optional
+    int8 = entries["h3-fl2va-int8"]
+    assert not int8.optional and int8.filename == reqs.FL2VA_INT8_FILE
+    assert "generation only" in int8.label
+    assert entries["h3-fl2va"].optional and entries["h3-fl2va-fp8"].optional
     assert "needed to train" in entries["h3-fl2va"].label
+    assert not entries["h3-video-vae-int8"].optional and entries["h3-video-vae"].optional
 
-    training = {c.id: c for c in reqs.components("fl2va", fp8_substitutes=False)}
-    assert not training["h3-fl2va"].optional and training["h3-fl2va-fp8"].optional
+    training = {c.id: c for c in reqs.components("fl2va", pruned_substitutes=False)}
+    assert not training["h3-fl2va"].optional and training["h3-fl2va-int8"].optional
 
 
 def test_training_refuses_a_pruned_build_by_name(models_root: Path) -> None:
@@ -720,19 +721,19 @@ def test_a_cancelled_run_does_not_poison_the_next_one() -> None:
         bar.update()  # must not raise: the cancelled run's callback is no longer installed
 
 
-def test_an_fp8_transformer_satisfies_the_partition_on_its_own(models_root: Path) -> None:
+def test_any_one_transformer_build_satisfies_the_partition(models_root: Path) -> None:
     """A box holding only the fp8 build was told its 66.3 GB bf16 twin was missing: the ref2va fp8
     file was declared nowhere at all, so the only reference transformer on offer was one most
     cards cannot hold. A partition needs *a* transformer, not a particular one."""
     fresh = {c.id: c for c in MiniMaxH3Provider("ref2va").components()}
-    assert not fresh["h3-ref2va-fp8"].optional, "with nothing on disk the partition still needs one"
+    assert not fresh["h3-ref2va-int8"].optional, "with nothing on disk the slot still needs one"
 
-    (models_root / "diffusion_models" / reqs.REF2VA_FILE).write_bytes(b"x")
+    (models_root / "diffusion_models" / reqs.REF2VA_FP8_FILE).write_bytes(b"x")
     held = {c.id: c for c in MiniMaxH3Provider("ref2va").components()}
-    assert held["h3-ref2va"].present
-    assert held["h3-ref2va-fp8"].optional, "holding bf16 is not missing the fp8 build"
-    # The other partition is unaffected: its own pair is still unsatisfied.
-    assert not {c.id: c for c in MiniMaxH3Provider("fl2va").components()}["h3-fl2va-fp8"].optional
+    assert held["h3-ref2va-fp8"].present
+    assert held["h3-ref2va-int8"].optional, "holding fp8 is not missing the int8 build"
+    # The other partition is unaffected: its own slot is still unsatisfied.
+    assert not {c.id: c for c in MiniMaxH3Provider("fl2va").components()}["h3-fl2va-int8"].optional
 
 
 def test_both_partitions_offer_an_fp8_build(models_root: Path) -> None:
@@ -744,3 +745,56 @@ def test_both_partitions_offer_an_fp8_build(models_root: Path) -> None:
     ):
         assert by_id[component_id].filename == filename
         assert by_id[component_id].repo_file.endswith(filename)
+
+
+def test_the_int8_builds_are_the_default_picks(models_root: Path) -> None:
+    """With every build on disk, the node renders with int8 unless the dropdown says otherwise."""
+    for name in (reqs.FL2VA_FILE, reqs.FL2VA_INT8_FILE, reqs.FL2VA_FP8_FILE):
+        (models_root / "diffusion_models" / name).write_bytes(b"x")
+    (models_root / "vae").mkdir()
+    for name in (reqs.VIDEO_VAE_FILE, reqs.VIDEO_VAE_INT8_FILE):
+        (models_root / "vae" / name).write_bytes(b"x")
+
+    assert reqs.resolve_transformer("fl2va").name == reqs.FL2VA_INT8_FILE
+    assert reqs.resolve_video_vae().name == reqs.VIDEO_VAE_INT8_FILE
+    assert reqs.resolve_video_vae(reqs.VIDEO_VAE_FILE).name == reqs.VIDEO_VAE_FILE
+    assert reqs.resolve_transformer("fl2va", reqs.FL2VA_FILE).name == reqs.FL2VA_FILE
+
+
+def test_a_downloaded_int8_build_is_remembered_as_its_partition(models_root: Path) -> None:
+    """Only the bf16 ids were recorded, so a renamed int8 or fp8 file could not be told apart."""
+    provider = MiniMaxH3Provider("ref2va")
+    by_id = {c.id: c for c in provider.components()}
+    path = models_root / "diffusion_models" / "renamed.safetensors"
+    path.write_bytes(b"x")
+
+    provider.after_download(by_id["h3-ref2va-int8"], path)
+
+    assert reqs.resolve_transformer("ref2va") == path
+    assert reqs.resolve_transformer("fl2va") is None
+
+
+def test_the_reference_node_is_not_offered_the_fl2va_file(models_root: Path) -> None:
+    """With only FL2VA on disk the UI took the first option and ran ref2va on FL2VA weights."""
+    for name in (reqs.FL2VA_INT8_FILE, "my_h3.safetensors"):
+        _fake_checkpoint(models_root / "diffusion_models" / name, _H3_PROBE)
+
+    assert MiniMaxH3Provider("ref2va").catalog_options("diffusion_models") == ["my_h3.safetensors"]
+    assert reqs.FL2VA_INT8_FILE in MiniMaxH3Provider("fl2va").catalog_options("diffusion_models")
+
+    reqs.record_provenance("ref2va", "my_h3.safetensors")
+    assert MiniMaxH3Provider("fl2va").catalog_options("diffusion_models") == [reqs.FL2VA_INT8_FILE]
+
+
+def test_training_never_resolves_the_pruned_int8_build(models_root: Path) -> None:
+    """Both on disk, as on the cloud volume: training must land on bf16, not refuse int8."""
+    for name in (reqs.FL2VA_FILE, reqs.FL2VA_INT8_FILE):
+        (models_root / "diffusion_models" / name).write_bytes(b"x")
+    (models_root / "vae").mkdir()
+    for name in (reqs.VIDEO_VAE_FILE, reqs.VIDEO_VAE_INT8_FILE):
+        (models_root / "vae" / name).write_bytes(b"x")
+
+    assert reqs.resolve_transformer("fl2va", for_training=True).name == reqs.FL2VA_FILE
+    assert reqs.resolve_video_vae(for_training=True).name == reqs.VIDEO_VAE_FILE
+    training = {c.id: c for c in reqs.components("fl2va", pruned_substitutes=False)}
+    assert not training["h3-video-vae"].optional or training["h3-video-vae"].present

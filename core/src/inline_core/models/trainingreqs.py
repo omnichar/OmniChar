@@ -80,8 +80,8 @@ def base_components(arch: str, base_mode: str) -> list[ModelComponent]:
     if arch == "minimax-h3":
         from .minimaxh3 import requirements as reqs
 
-        # The fp8 builds generate but do not fine-tune, so they cannot stand in here.
-        return _required(reqs.components(fp8_substitutes=False))
+        # The pruned fp8 and int8 builds generate but do not fine-tune, so they cannot stand in.
+        return _required(reqs.components(pruned_substitutes=False))
     return []
 
 

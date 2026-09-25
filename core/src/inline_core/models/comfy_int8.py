@@ -118,7 +118,7 @@ def int8_layers(
             continue  # fp8 and the rest carry markers too; their loaders read those
         weight_shape = shapes.get(layer + ".weight") or []
         if len(weight_shape) != 2:
-            continue  # a non-Linear (an int8 embedding table): the caller dequantises those
+            continue  # not a 2-D weight, so not a Linear or an embedding table
         label = f"{where} {layer}"
         spec = int8_spec(parse_marker(marker_bytes(key), label), weight_shape[1], label)
         if spec is None:

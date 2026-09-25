@@ -116,7 +116,7 @@ def load_pipeline(
         reqs.resolve("text_encoders", "MiniMax-H3-processor"), "the tokenizer and processor"
     )
     video_vae_path = _wired(video_vae) or _require(
-        reqs.resolve("vae", reqs.VIDEO_VAE_FILE, params.get("vae")), "the video VAE"
+        reqs.resolve_video_vae(params.get("vae")), "the video VAE"
     )
     audio_vae = _require(reqs.resolve("vae", reqs.AUDIO_VAE_FILE), "the audio VAE")
 
@@ -302,8 +302,7 @@ def _build(
     _placement_kwargs = _encoder_placement(placement) if encoder_quant is not None else {}
     _encoder_on_card = _placement_kwargs.get("device_map", {}).get("") not in (None, "cpu")
     if _is_nvfp4(encoder_dir):
-        # Already 4-bit on disk, so the NF4 rung would be quantising a quantised file - the same
-        # rule that turns quantization off for any prequantized source.
+        # Already nvfp4 or int8 on disk, so the NF4 rung would quantise a quantised file.
         _encoder_on_card = False
         text_encoder = _load_packed_encoder(encoder_dir, dtype)
     else:
@@ -622,7 +621,7 @@ def _nvfp4_layers(keys: set[str]) -> int:
 
 
 def _load_packed_encoder(path: Path, dtype: Any) -> Any:
-    """Qwen3-VL from an NVFP4 file, with every quantised Linear left packed.
+    """Qwen3-VL from a ComfyUI nvfp4 or int8 file, with every quantised Linear left packed.
 
     Built on ``meta`` and populated by hand because transformers has no reader for this format;
     materialising it first would want the 51 GB the packed file exists to avoid. The build is

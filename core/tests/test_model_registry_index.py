@@ -161,3 +161,13 @@ def test_an_outage_does_not_turn_a_miss_into_an_endless_retry(tmp_path: Path) ->
     missing, stale = ri.resolve(["nothing_here.safetensors"])
     assert missing[0].matches == []
     assert stale is True
+
+
+def test_comfy_int8_builds_group_with_their_siblings() -> None:
+    """``int8`` alone left ``_convrot`` in the name, which put the file in a group of its own."""
+    assert ri.group_of("minimax_h3_fl2va_pruned_int8_convrot.safetensors") == (
+        "minimax-h3-fl2va", "pruned_int8_convrot"
+    )
+    assert ri.group_of("minimax_h3_video_vae_int8_convrot.safetensors") == (
+        "minimax-h3-video-vae", "int8_convrot"
+    )

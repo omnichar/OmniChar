@@ -115,7 +115,7 @@ What has been run, and what has a code path nobody has verified:
 | ----------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | **NVIDIA, Linux**       | **Tested**, Z-Image Turbo 1024² on a T4 (16GB); Krea 2 1024² and LoRA training on an L40S (48GB) | None                                                                                           |
 | **NVIDIA, Windows**     | Supported                                                                                        | PyPI's default torch is CPU-only on Windows, so `--install` picks the CUDA build for your card |
-| **Apple Silicon (MPS)** | Code path exists, **untested**                                                                   | None. No on-load int8 on MPS, so size to unified memory; ComfyUI int8 files still load         |
+| **Apple Silicon (MPS)** | Code path exists, **untested**                                                                   | None. No int8 quantising on MPS, so a model must fit unified memory; ComfyUI int8 loads        |
 | **AMD (ROCm), Linux**   | **Untested**, reports welcome                                                                    | Needs a ROCm build of PyTorch, see below                                                       |
 | **CPU only**            | Works, very slow                                                                                 | `./webui.sh --cpu`                                                                             |
 
@@ -297,7 +297,7 @@ H3 transformers do not load. A build the node cannot read is listed along with t
 quantisation it does not recognise is refused rather than guessed at.
 
 **ComfyUI int8 support.** The `int8_convrot` and `int8_tensorwise` files you use in ComfyUI load
-here unchanged and stay int8 in VRAM, about half their bf16 size.
+here unchanged, except LTX-2.5's Gemma encoder, and stay int8 in VRAM, about half their bf16 size.
 
 A smaller file downloads faster, but it does not use less VRAM. Fitting the model to your card is
 the device policy's job whichever build you start from.
@@ -310,8 +310,8 @@ core/models/
                      flux-2-klein-base-4b.safetensors    <- FLUX.2 base build, for training
                      flux-2-klein-base-9b.safetensors    <- FLUX.2 9B base, for training (gated)
                      flux1-dev.safetensors               <- FLUX.1 dev, generate and train
-                     minimax_h3_fl2va_bf16.safetensors   <- H3 text, image, first/last frame
-                     minimax_h3_ref2va_bf16.safetensors  <- H3 reference node
+                     minimax_h3_fl2va_pruned_int8_convrot.safetensors   <- H3 text, image, first/last frame
+                     minimax_h3_ref2va_pruned_int8_convrot.safetensors  <- H3 reference node
                      ltx-2.5-22b-distilled-transformer-bf16.safetensors  <- LTX fast mode
                      ltx-2.5-22b-dev-transformer-bf16.safetensors        <- LTX quality mode, and training
   text_encoders/     qwen3vl_4b_bf16.safetensors         <- Krea 2
@@ -319,13 +319,13 @@ core/models/
                      qwen_3_8b.safetensors               <- FLUX.2 klein 9B
                      t5xxl_fp16.safetensors              <- FLUX.1 sequence encoder
                      clip_l.safetensors                  <- FLUX.1 pooled encoder
-                     MiniMax-H3-text-encoder/            <- Qwen3-VL-32B, a folder
+                     qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors       <- H3, Qwen3-VL-32B
                      MiniMax-H3-processor/
                      gemma4-12b-with-proj-ltx-2.5-bf16.safetensors       <- LTX
   vae/               qwen_image_vae_diffusers.safetensors
                      ae.safetensors                      <- FLUX.1, the same file Z-Image uses
                      flux2-vae.safetensors
-                     minimax_h3_video_vae_fp16.safetensors
+                     minimax_h3_video_vae_int8_convrot.safetensors
                      minimax_h3_audio_vae_fp32.safetensors
                      ltx-2.5-video-vae-bf16.safetensors
                      ltx-2.5-audio-vae-bf16.safetensors
@@ -336,10 +336,10 @@ core/models/
 Krea 2's VAE is the **diffusers-format** one from [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image);
 ComfyUI's `qwen_image_vae.safetensors` holds the same weights in a layout diffusers cannot read.
 
-**MiniMax H3 is big:** about 139GB for the first three nodes and 205GB with the reference node,
-though the fp8_scaled transformer takes 45GB off each of those. Measured on a 45GB card, a 10 second
-clip at 960x544 takes about 7.2 minutes, peaking at 38.9GB VRAM and 46.7GB of system RAM, so plan on
-64GB of RAM. Canvas size is the biggest speed lever: 960x544 renders about 2.3x faster per step than
+**MiniMax H3 is big:** the int8 builds above come to about 40GB for the first three nodes and
+61GB with the reference node. Training needs the 66.3GB bf16 transformer on top. Measured before
+the int8 default on a 45GB card, a 10 second clip at 960x544 takes about 7.2 minutes, peaking at
+38.9GB VRAM and 46.7GB of system RAM, so plan on 64GB of RAM. Canvas size is the biggest speed lever: 960x544 renders about 2.3x faster per step than
 1344x768.
 
 **LTX-2.5 is gated and big:** 71GB for fast mode, 122GB with quality mode. Accept the LTX-2 Community

@@ -214,7 +214,7 @@ def load_transformer(
         # else, so a run with no adapter and a run with one that never arrived look identical in
         # the log, and the only way to tell them apart was to render twice and compare.
         logger.info(
-            "MiniMax H3: fused %d LoRA layer(s) from %s",
+            "MiniMax H3: applied %d LoRA layer(s) from %s (live adapters on int8 layers)",
             len(lora_plan),
             ", ".join(f"{Path(ref.file).name}@{ref.strength:g}" for ref in loras),
         )

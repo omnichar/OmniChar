@@ -30,7 +30,6 @@ MINIMAX_REPO = "MiniMaxAI/MiniMax-H3"
 
 FL2VA_FILE = "minimax_h3_fl2va_bf16.safetensors"
 #: The generation default: ComfyUI's int8 build, a third the download, and it stays int8 in VRAM.
-#: Pruned builds do not train, because the trainer needs the timestep path they do not ship.
 FL2VA_INT8_FILE = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 FL2VA_FP8_FILE = "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
 REF2VA_FILE = "minimax_h3_ref2va_bf16.safetensors"
@@ -42,7 +41,7 @@ TEXT_ENCODER_DIR = "FL2VA/text_encoder"
 ENCODER_NVFP4_FILE = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 ENCODER_BF16_FILE = "qwen3vl_32b_minimax_h3_bf16.safetensors"
 VIDEO_VAE_FILE = "minimax_h3_video_vae_fp16.safetensors"
-#: Only the decoder is int8, so it encodes exactly as the fp16 file does and suits training too.
+#: The generation default; training keeps the fp16 file, the one the cloud training volume holds.
 VIDEO_VAE_INT8_FILE = "minimax_h3_video_vae_int8_convrot.safetensors"
 AUDIO_VAE_FILE = "minimax_h3_audio_vae_fp32.safetensors"
 
@@ -82,6 +81,8 @@ class Candidate:
             return ""
         if not self.is_h3:
             return "not a MiniMax H3 transformer"
+        if self.quantisation == "unknown":
+            return "quantised in a format this node cannot read (not ComfyUI int8 or fp8)"
         if self.quantisation:
             return f"quantised as {self.quantisation}, which this node cannot read"
         return ""
@@ -157,8 +158,8 @@ def _quantisation(dtypes: dict[str, str], has_sidecars: bool) -> str:
     return "unknown" if has_sidecars else ""
 
 
-def usable_transformers() -> list[Path]:
-    """Every H3 transformer in ``diffusion_models/`` this node can actually load."""
+def usable_transformers(partition: str | None = None) -> list[Path]:
+    """Every H3 transformer this node can load, less those known to be the other partition's."""
     root = models_dir() / "diffusion_models"
     if not root.is_dir():
         return []
@@ -166,7 +167,17 @@ def usable_transformers() -> list[Path]:
         entry
         for entry in root.iterdir()
         if entry.is_file() and entry.suffix == ".safetensors" and inspect_file(entry).usable
+        and (partition is None or not _other_partitions(entry.name, partition))
     )
+
+
+def _other_partitions(name: str, partition: str) -> bool:
+    """Whether a file is recorded as, or named for, the other partition; the shapes cannot tell."""
+    recorded = _provenance()
+    if recorded.get(partition) == name:
+        return False
+    other = "ref2va" if partition == "fl2va" else "fl2va"
+    return recorded.get(other) == name or other in name.lower()
 
 
 def rejected_transformers() -> list[Candidate]:
@@ -196,7 +207,9 @@ def resolve(category: str, filename: str, chosen: object = None) -> Path | None:
     )
 
 
-def resolve_transformer(partition: str, chosen: object = None) -> Path | None:
+def resolve_transformer(
+    partition: str, chosen: object = None, *, for_training: bool = False
+) -> Path | None:
     """The file for a partition.
 
     An explicit pick wins, because it is the only way to point the node at a hand-placed or renamed
@@ -210,17 +223,18 @@ def resolve_transformer(partition: str, chosen: object = None) -> Path | None:
     picked = _picked("diffusion_models", chosen)
     if picked is not None:
         return picked
-    defaults = (
+    int8, bf16 = (
         (FL2VA_INT8_FILE, FL2VA_FILE) if partition == "fl2va" else (REF2VA_INT8_FILE, REF2VA_FILE)
     )
-    for wanted in defaults:
+    # Training reads the timestep path a pruned build does not ship, so it never takes the int8.
+    for wanted in (bf16,) if for_training else (int8, bf16):
         direct = resolve("diffusion_models", wanted)
         if direct is not None:
             return direct
     recorded = _provenance().get(partition)
     if recorded:
         candidate = models_dir() / "diffusion_models" / recorded
-        if candidate.exists():
+        if candidate.exists() and not (for_training and inspect_file(candidate).pruned):
             return candidate
     return None
 
@@ -249,28 +263,26 @@ def record_provenance(partition: str, filename: str) -> None:
     path.write_text(json.dumps(current, indent=2))
 
 
-def components(partition: str = "fl2va", *, fp8_substitutes: bool = True) -> list[ModelComponent]:
-    """What this node needs, with live presence. Sizes in the labels because the totals are large
-    enough that a user deserves to know before pressing Download."""
+def components(
+    partition: str = "fl2va", *, pruned_substitutes: bool = True
+) -> list[ModelComponent]:
+    """What this node needs, with presence and sizes; generation wants int8, training bf16."""
     ref2va_required = partition == "ref2va"
 
-    def pair(needed: bool) -> tuple[bool, bool]:
-        """``(bf16 optional, fp8 optional)`` for a partition this node does or does not use.
+    def optional(needed: bool, *, for_training: bool) -> bool:
+        return not needed or pruned_substitutes == for_training
 
-        The pruned fp8 build is what generation asks for: same render, 21 GB against 66.3, and it
-        fits cards that cannot hold the bf16 at all. Training inverts it - fp8 renders but does not
-        fine-tune - which is what ``fp8_substitutes=False`` selects.
-        """
-        if not needed:
-            return True, True
-        return fp8_substitutes, not fp8_substitutes
-
-    fl2va_bf16, fl2va_fp8 = pair(not ref2va_required)
-    ref2va_bf16, ref2va_fp8 = pair(ref2va_required)
     entries: list[ModelComponent] = [
+        _file("h3-fl2va-int8", "FL2VA transformer, int8 (21.0 GB, generation only)",
+              "diffusion_models", FL2VA_INT8_FILE, COMFY_REPO,
+              f"diffusion_models/{FL2VA_INT8_FILE}",
+              optional=optional(not ref2va_required, for_training=False)),
         _file("h3-fl2va", "FL2VA transformer, bf16 (66.3 GB, needed to train)",
-              "diffusion_models", FL2VA_FILE,
-              COMFY_REPO, f"diffusion_models/{FL2VA_FILE}", optional=fl2va_bf16),
+              "diffusion_models", FL2VA_FILE, COMFY_REPO, f"diffusion_models/{FL2VA_FILE}",
+              optional=optional(not ref2va_required, for_training=True)),
+        _file("h3-fl2va-fp8", "FL2VA transformer, fp8 (21.0 GB, generation only)",
+              "diffusion_models", FL2VA_FP8_FILE, COMFY_REPO,
+              f"diffusion_models/{FL2VA_FP8_FILE}", optional=True),
         _file("h3-text-encoder-nvfp4", "Text encoder, Qwen3-VL-32B nvfp4 (15.7 GB)",
               "text_encoders", ENCODER_NVFP4_FILE,
               COMFY_REPO, f"text_encoders/{ENCODER_NVFP4_FILE}"),
@@ -279,31 +291,36 @@ def components(partition: str = "fl2va", *, fp8_substitutes: bool = True) -> lis
         _file("h3-text-encoder-bf16", "Text encoder, Qwen3-VL-32B bf16 single file (51.5 GB)",
               "text_encoders", ENCODER_BF16_FILE,
               COMFY_REPO, f"text_encoders/{ENCODER_BF16_FILE}", optional=True),
-        _file("h3-video-vae", "Video VAE (5.2 GB)", "vae", VIDEO_VAE_FILE,
-              COMFY_REPO, f"vae/{VIDEO_VAE_FILE}"),
+        _file("h3-video-vae-int8", "Video VAE, int8 (2.8 GB)", "vae", VIDEO_VAE_INT8_FILE,
+              COMFY_REPO, f"vae/{VIDEO_VAE_INT8_FILE}", optional=not pruned_substitutes),
+        _file("h3-video-vae", "Video VAE, fp16 (5.2 GB)", "vae", VIDEO_VAE_FILE,
+              COMFY_REPO, f"vae/{VIDEO_VAE_FILE}", optional=pruned_substitutes),
         _file("h3-audio-vae", "Audio VAE (0.6 GB)", "vae", AUDIO_VAE_FILE,
               COMFY_REPO, f"vae/{AUDIO_VAE_FILE}"),
         _folder("h3-processor", "Tokenizer and processor (12 MB)", "text_encoders",
                 "MiniMax-H3-processor", MINIMAX_REPO, "FL2VA/processor"),
+        _file("h3-ref2va-int8", "Ref2VA transformer, int8 (21.0 GB, generation only)",
+              "diffusion_models", REF2VA_INT8_FILE, COMFY_REPO,
+              f"diffusion_models/{REF2VA_INT8_FILE}",
+              optional=optional(ref2va_required, for_training=False)),
         _file("h3-ref2va", "Ref2VA transformer, bf16 (66.3 GB, needed to train)",
-              "diffusion_models", REF2VA_FILE,
-              COMFY_REPO, f"diffusion_models/{REF2VA_FILE}", optional=ref2va_bf16),
-        _file("h3-fl2va-fp8", "FL2VA transformer, fp8 (21.0 GB, generation only)",
-              "diffusion_models", FL2VA_FP8_FILE,
-              COMFY_REPO, f"diffusion_models/{FL2VA_FP8_FILE}", optional=fl2va_fp8),
+              "diffusion_models", REF2VA_FILE, COMFY_REPO, f"diffusion_models/{REF2VA_FILE}",
+              optional=optional(ref2va_required, for_training=True)),
         _file("h3-ref2va-fp8", "Ref2VA transformer, fp8 (21.0 GB, generation only)",
-              "diffusion_models", REF2VA_FP8_FILE,
-              COMFY_REPO, f"diffusion_models/{REF2VA_FP8_FILE}", optional=ref2va_fp8),
+              "diffusion_models", REF2VA_FP8_FILE, COMFY_REPO,
+              f"diffusion_models/{REF2VA_FP8_FILE}", optional=True),
     ]
-    # A partition needs *a* transformer, not a particular one. Without this a box holding only the
-    # fp8 build - the one that fits most cards - was told its 66.3 GB bf16 twin was missing. Off for
-    # training, where a pruned fp8 build is not a substitute: it generates, it does not fine-tune.
-    # Any encoder build also works for training, which only encodes captions with it.
+    # A slot needs a file, not a particular one; pruned builds do not stand in for bf16 in training.
     pairs: tuple[tuple[str, ...], ...] = (
         ("h3-text-encoder-nvfp4", "h3-text-encoder", "h3-text-encoder-bf16"),
+        ("h3-video-vae-int8", "h3-video-vae"),
     )
-    if fp8_substitutes:
-        pairs = (("h3-fl2va", "h3-fl2va-fp8"), ("h3-ref2va", "h3-ref2va-fp8"), *pairs)
+    if pruned_substitutes:
+        pairs = (
+            ("h3-fl2va-int8", "h3-fl2va", "h3-fl2va-fp8"),
+            ("h3-ref2va-int8", "h3-ref2va", "h3-ref2va-fp8"),
+            *pairs,
+        )
     return _satisfy_alternatives(entries, pairs)
 
 
@@ -380,12 +397,13 @@ def resident_bytes(path: Path) -> int:
     return total
 
 
-def resolve_video_vae(pick: object = None) -> Path | None:
-    """The video VAE: an explicit pick, else the int8 build, else the fp16 one."""
-    return (
-        _picked("vae", pick)
-        or resolve("vae", VIDEO_VAE_INT8_FILE)
-        or resolve("vae", VIDEO_VAE_FILE)
+def resolve_video_vae(pick: object = None, *, for_training: bool = False) -> Path | None:
+    """The video VAE: an explicit pick, else int8 to generate and fp16 to train, else the other."""
+    order = (VIDEO_VAE_FILE, VIDEO_VAE_INT8_FILE)
+    return _picked("vae", pick) or next(
+        (found for name in (order if for_training else order[::-1])
+         if (found := resolve("vae", name)) is not None),
+        None,
     )
 
 

@@ -158,7 +158,7 @@ def _pin_web_mime_types() -> None:
         mimetypes.add_type(mime, ext)
 
 
-_UPLOAD_SOURCES = frozenset({"input/image", "input/video"})
+_UPLOAD_SOURCES = frozenset({"input/image", "input/video", "input/audio"})
 
 
 class _UnknownAsset(Exception):

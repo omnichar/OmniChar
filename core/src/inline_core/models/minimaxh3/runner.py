@@ -28,6 +28,7 @@ from ...media import MediaKind
 from ...runtime.context import ExecutionContext
 from ...runtime.progress import Phase
 from ...runtime.store import TakeStore
+from ...takes import AssetRef
 from .. import pipeline_runtime as rt
 from ..references import ReferenceKind, ReferenceLimits, collect_references, describe
 from ..video_params import VideoGrid, snap_canvas, snap_frames, video_param_fields
@@ -123,6 +124,16 @@ def _params(variant: Variant) -> tuple[ParamField, ...]:
                 Widget.BOOLEAN, False,
             )
         )
+        fields.append(
+            ParamField(
+                "character_voice", "Character voice", Widget.SELECT, "auto",
+                options=(
+                    Option("auto", "When the prompt has dialogue"),
+                    Option("always", "Always"),
+                    Option("never", "Never"),
+                ),
+            )
+        )
     fields.append(
         ParamField(
             "model", "Diffusion model", Widget.SELECT, "",
@@ -208,6 +219,8 @@ class Request:
     references: tuple[Any, ...] = ()
     #: The wired character's adapter, appended to the user's own LoRAs rather than replacing them.
     character_loras: tuple[Any, ...] = ()
+    #: Shown while the model loads, so a voice that could not be applied is not silently dropped.
+    notice: str = ""
 
     @property
     def seconds(self) -> float:
@@ -238,6 +251,10 @@ def build_request(
             # numbered and limit-checked as images - appending would land them behind the videos.
             # Already trimmed to fit by `_apply_character`, which owns the numbering.
             inputs = {**inputs, "references": [*wired, *character.refs]}
+        if character is not None and character.voice is not None:
+            # After the wired clips, which keep the `<Audio N>` numbers the user's prompt names.
+            audio = [v for v in (inputs.get("audio") or []) if v is not None]
+            inputs = {**inputs, "audio": [*audio, character.voice]}
         references = collect_references(inputs, limits=REFERENCE_LIMITS)
         if not references:
             raise ComponentError(
@@ -258,6 +275,7 @@ def build_request(
         partition=variant.partition,
         references=references,
         character_loras=loras,
+        notice=character.notice if character is not None else "",
     )
 
 
@@ -266,6 +284,8 @@ class _Character:
     refs: list[Any]
     prefix: str
     lora: Any = None
+    voice: AssetRef | None = None
+    notice: str = ""
 
 
 def _character_file(inputs: dict[str, list[Any]]) -> str:
@@ -306,6 +326,11 @@ def _apply_character(
     # A reference sweep varies the set per render and must do so through this same path, or it
     # measures something production never runs. None on every normal render.
     wired_char = (inputs.get("character") or [None])[0]
+    from ...characters import voice as vc
+
+    prompt = rt.first_str(inputs.get("prompt")) or ""
+    voice_mode = params.get("character_voice", vc.VOICE_AUTO)
+    use_voice = variant.references and vc.wanted(voice_mode, prompt)
     applied = characters.char_apply(
         chosen,
         ARCH,
@@ -313,6 +338,7 @@ def _apply_character(
         limit=slots if variant.references else None,
         keep_roles=keep if variant.references else None,
         select=getattr(wired_char, "select", None),
+        with_voice=use_voice,
     )
     if applied is None:
         return None
@@ -324,10 +350,22 @@ def _apply_character(
                 "Train one and attach it, or use MiniMax H3 Reference to Video."
             )
         logger.info("Applying character %s by adapter", applied.name)
+        notice = ""
+        if vc.wanted(voice_mode, prompt) and characters.has_voice(chosen):
+            notice = "Voice not applied: it needs MiniMax H3 Reference to Video"
+            logger.warning("%s: %s carries a voice that %s cannot take", notice, chosen, ARCH)
         return _Character(
             refs=[],
             prefix=applied.prompt_prefix(1),
             lora=LoraRef(file=str(applied.lora), strength=applied.lora_strength),
+            notice=notice,
+        )
+    wired_audio = len([v for v in (inputs.get("audio") or []) if v is not None])
+    if applied.voice is not None and wired_audio >= REFERENCE_LIMITS.max_audio:
+        raise ComponentError(
+            f"{variant.title} takes {REFERENCE_LIMITS.max_audio} audio references and "
+            f"{wired_audio} are wired, so {chosen}'s voice has no slot left. Unwire one, or turn "
+            "off Use the character's voice."
         )
     if not applied.refs:
         raise ComponentError(
@@ -343,17 +381,43 @@ def _apply_character(
         ", ".join(f"{n} {role}" for role, n in counts.items()) or "no references",
         wired,
     )
+    voice = AssetRef(ref="path", path=str(applied.voice)) if applied.voice is not None else None
+    if voice is not None:
+        logger.info("Applying %s's voice as audio reference %d", applied.name, wired_audio + 1)
     return _Character(
         refs=applied.refs,
         prefix=applied.prompt_prefix(
-            wired + 1, style="token", role_lines=bool(params.get("character_role_lines"))
+            wired + 1,
+            style="token",
+            role_lines=bool(params.get("character_role_lines")),
+            voice_position=(
+                _sounding_videos(inputs) + wired_audio + 1 if voice is not None else None
+            ),
         ),
+        voice=voice,
         lora=(
             LoraRef(file=str(applied.lora), strength=applied.lora_strength)
             if applied.lora is not None
             else None
         ),
     )
+
+
+def _sounding_videos(inputs: dict[str, list[Any]]) -> int:
+    """Wired videos with sound, whose soundtracks H3 numbers `<Audio j>` ahead of the clips."""
+    count = 0
+    for value in inputs.get("video") or []:
+        path = getattr(value, "path", None) or value
+        if not isinstance(path, str | Path) or not Path(str(path)).is_file():
+            continue
+        try:
+            import av
+
+            with av.open(str(path)) as container:
+                count += 1 if container.streams.audio else 0
+        except Exception as error:  # noqa: BLE001 - an unreadable clip fails later, with its own error
+            logger.warning("Could not check %s for a soundtrack: %s", Path(str(path)).name, error)
+    return count
 
 
 def _h3_reference(ref: Any, label: str) -> Any:
@@ -441,7 +505,8 @@ class MiniMaxH3Runner(NodeRunner):
         )
 
         rt.raise_if_cancelled(ctx)
-        ctx.emitter.emit(rt.progress_event(ctx, node, Phase.LOADING, 0.0, status="Loading model…"))
+        loading = f"Loading model… {request.notice}" if request.notice else "Loading model…"
+        ctx.emitter.emit(rt.progress_event(ctx, node, Phase.LOADING, 0.0, status=loading))
         # Wired component handles from load/* subnodes override the dropdowns, which in turn
         # override the default filenames, as on the image nodes. All of it reaches the cache key
         # through the resolved paths themselves.
@@ -501,7 +566,8 @@ class MiniMaxH3Runner(NodeRunner):
         logger.info("MiniMax H3 sampled in %.1fs", time.perf_counter() - started)
         rt.free_vram()
 
-        ctx.emitter.emit(rt.progress_event(ctx, node, Phase.SAVE, 1.0, status="Saving…"))
+        saving = f"Saving… {request.notice}" if request.notice else "Saving…"
+        ctx.emitter.emit(rt.progress_event(ctx, node, Phase.SAVE, 1.0, status=saving))
         return self._result(node, ctx, state, request)
 
     def _result(

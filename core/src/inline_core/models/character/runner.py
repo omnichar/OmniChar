@@ -16,6 +16,7 @@ from typing import Any
 
 from ...characters import charfile as cf
 from ...characters import encode, library, scoring, verify, weights
+from ...characters import voice as vc
 from ...graph.descriptor import NodeDescriptor, Option, ParamField, Port, Widget
 from ...graph.runners import NodeResult, NodeRunner
 from ...graph.schema import Node, PortKind
@@ -66,6 +67,8 @@ ENCODE = NodeDescriptor(
         Port("body", "Body references", PortKind.IMAGE_LIST, required=False),
         Port("cloth", "Clothing references", PortKind.IMAGE_LIST, required=False),
         Port("description", "Description", PortKind.TEXT, required=False),
+        # Only MiniMax H3 Reference to Video can use it; every other model ignores it.
+        Port("voice", "Voice (H3 Reference)", PortKind.AUDIO, required=False),
     ),
     outputs=(Port("character", "Character", PortKind.CHARACTER),),
     params=(
@@ -243,12 +246,14 @@ EDIT = NodeDescriptor(
         Port("character", "Character", PortKind.CHARACTER, required=True),
         Port("images", "Add references", PortKind.IMAGE_LIST, required=False),
         Port("description", "Description", PortKind.TEXT, required=False),
+        Port("voice", "Replace voice (H3 Reference)", PortKind.AUDIO, required=False),
     ),
     outputs=(Port("character", "Character", PortKind.CHARACTER),),
     params=(
         ParamField("name", "Rename to", Widget.TEXT, ""),
         ParamField("description", "Description", Widget.TEXTAREA, ""),
         ParamField("drop", "Remove references", Widget.TEXT, ""),
+        ParamField("drop_voice", "Remove voice", Widget.BOOLEAN, False),
         # The encoders are pickable, not just visible: a node that silently uses a file the user
         # cannot see or change is the reason none of them showed up as missing.
         ParamField(
@@ -358,6 +363,8 @@ class EncodeCharacterRunner(NodeRunner):
 
         _use_encoders(node)
         paths = [_image_path(ref) for ref in refs]
+        # Before the encode, so a bad clip fails in seconds rather than after the embeddings.
+        voice = _prepared_voice(inputs)
 
         def report(fraction: float, status: str) -> None:
             ctx.emitter.emit(progress_event(ctx, node, Phase.ENCODE, fraction, status=status))
@@ -365,6 +372,8 @@ class EncodeCharacterRunner(NodeRunner):
         doc = encode.char_encode(
             paths, name=name, roles=roles, description=description, on_progress=report
         )
+        if voice is not None:
+            vc.set_voice(doc, voice)
         counts = {role: roles.count(role) for role in cf.ROLES if roles.count(role)}
         logger.info(
             "Encoded character %s from %d reference(s): %s",
@@ -395,6 +404,11 @@ class EditCharacterRunner(NodeRunner):
         if added:
             encode.append_refs(doc, added)
 
+        if node.params.get("drop_voice") is True and vc.drop_voice(doc):
+            logger.info("Removed the voice from %s", doc.manifest.name)
+        voice = _prepared_voice(inputs)
+        if voice is not None:
+            vc.set_voice(doc, voice)
         name = str(node.params.get("name") or "").strip()
         if name:
             doc.manifest.name = name
@@ -597,7 +611,8 @@ class WriteCharacterRunner(NodeRunner):
         identity = _first(inputs.get("character"))
         if not isinstance(identity, Identity):
             raise ValueError("Write .char needs a character.")
-        doc = identity.doc
+        # Copied like Edit's: payloads mutate the doc, and the upstream output is cached and shared.
+        doc = copy.deepcopy(identity.doc)
         for payload in inputs.get("payloads") or []:
             if not isinstance(payload, Payload):
                 continue
@@ -763,6 +778,23 @@ class AttachAdapterRunner(NodeRunner):
 
         payload = Payload(arch=arch, kind=encode.PAYLOAD_LORA, apply=apply)
         return NodeResult(outputs={"payload": payload})
+
+
+def _prepared_voice(inputs: dict[str, list[Any]]) -> vc.PreparedVoice | None:
+    """The wired voice clip checked and normalised, or None when nothing is wired."""
+    ref = _first(inputs.get("voice"))
+    if ref is None:
+        return None
+    raw = getattr(ref, "path", None) or ref
+    if not isinstance(raw, str | Path) or not Path(str(raw)).is_file():
+        raise ValueError("The wired voice could not be read. Wire an audio file from Load Assets.")
+    path = Path(str(raw))
+    if path.stat().st_size > vc.MAX_SAMPLE_BYTES:
+        raise vc.VoiceError(
+            f"{path.name} is over {vc.MAX_SAMPLE_BYTES // 1024**2} MB. About 30 seconds of "
+            "speech is all a voice needs."
+        )
+    return vc.prepare(path.read_bytes(), path.name)
 
 
 def _as_float(value: Any, fallback: float) -> float:

@@ -153,6 +153,39 @@ describe('graphRecipe', () => {
   })
 })
 
+describe('an unpicked character', () => {
+  it('exports empty instead of naming the first character in the catalog', async () => {
+    useMoodboardStore.setState({
+      items: [item('load1', 'core', { core: { type: 'character/load', params: { file: '' } } })],
+      connectors: [],
+    })
+    useCoreNodesStore.setState({
+      descriptors: [
+        {
+          type: 'character/load',
+          title: 'Load Character',
+          category: 'Character',
+          icon: 'sparkles',
+          inputs: [],
+          outputs: [],
+          params: [
+            {
+              key: 'file',
+              label: 'Character',
+              widget: 'select',
+              default: '',
+              optionsFrom: 'characters',
+              options: [{ value: 'got.char', label: 'got.char' }],
+            },
+          ],
+        },
+      ] as unknown as NodeDescriptor[],
+    })
+    const recipe = await graphRecipe('load1')
+    expect(recipe.params).toEqual({ file: '' })
+  })
+})
+
 describe('unsupportedTypes', () => {
   it('is empty for a graph the importer can rebuild', () => {
     expect(unsupportedTypes('core1')).toEqual([])

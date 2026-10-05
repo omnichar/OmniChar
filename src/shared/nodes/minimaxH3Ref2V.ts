@@ -11,6 +11,7 @@ import {
   portMedia,
   withCharacterPrompt,
   withCharacterRefs,
+  withCharacterVoice,
   type NodeDef,
   type ResolvedInputs,
 } from './types'
@@ -42,6 +43,7 @@ export const MINIMAX_H3_REF2V: NodeDef = {
     style: 'token',
     maxImages: MAX_IMAGES,
     maxRefs: MAX_IMAGES,
+    voicePort: 'reference_audio_urls',
   },
   params: [
     ...H3_BASE_PARAMS,
@@ -59,7 +61,7 @@ export const MINIMAX_H3_REF2V: NodeDef = {
       MAX_VIDEOS,
     )
     // Images and video carry the subject, so audio yields first when the combined cap bites.
-    const audios = portMedia(MINIMAX_H3_REF2V, resolved, 'reference_audio_urls')
+    const audios = withCharacterVoice(MINIMAX_H3_REF2V, resolved, 'reference_audio_urls')
       .slice(0, MAX_AUDIOS)
       .slice(0, Math.max(0, MAX_TOTAL - images.length - videos.length))
     return buildH3Body(

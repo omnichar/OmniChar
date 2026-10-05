@@ -436,6 +436,9 @@ export interface FalCharacterRequest {
   keepRoles?: CharacterRole[]
   /** Name each role in the prompt, for an endpoint sent only part of the character. */
   roleLines?: boolean
+  /** Offer the character's voice at this 1-based audio position. Core sends it only when `prompt`
+   *  has dialogue. Absent sends none. */
+  voice?: { firstPosition: number; prompt: string }
 }
 
 /** A prebuilt fal request the browser hands to the backend to run (fal defs are studio-side). */

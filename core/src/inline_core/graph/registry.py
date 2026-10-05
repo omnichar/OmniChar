@@ -11,9 +11,11 @@ from .descriptor import NodeDescriptor
 from .loader_runners import register_loaders
 from .primitives import register_primitives
 from .runners import (
+    AUDIO_INPUT,
     IMAGE_INPUT,
     TEXT_INPUT,
     VIDEO_INPUT,
+    AudioInputRunner,
     ImageInputRunner,
     NodeRunner,
     TextInputRunner,
@@ -92,6 +94,7 @@ def build_default_registry() -> Registry:
     registry.register(replace(TEXT_INPUT, hidden=True), TextInputRunner())
     registry.register(replace(IMAGE_INPUT, hidden=True), ImageInputRunner())
     registry.register(replace(VIDEO_INPUT, hidden=True), VideoInputRunner())
+    registry.register(replace(AUDIO_INPUT, hidden=True), AudioInputRunner())
     register_primitives(registry)
     register_loaders(registry)
     return registry

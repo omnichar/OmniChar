@@ -298,9 +298,11 @@ export function GraphNode({ id, data, selected }: NodeProps): React.JSX.Element 
   // load. A generation node's provider resolves this; a plain loader has none, so fall back to the
   // first file in its catalog, which is the one the engine auto-picks anyway.
   const fileField = descriptor.params.find((p) => p.key === 'file')
-  const fileFallback = fileField?.default || fileField?.options?.[0]?.value
-  // Only a node that picks a weights file has one to name; a character node has no `file` param,
-  // and calling that "Not installed" reads as broken rather than as nothing to show.
+  // Load Character never auto-picks, so naming the first catalog entry showed a pick Core never got.
+  const picksCharacter = fileField?.optionsFrom === 'characters'
+  const fileFallback = picksCharacter
+    ? 'No character picked'
+    : fileField?.default || fileField?.options?.[0]?.value
   const fileLabel = fileField ? String(fileParam || fileFallback || 'Not installed') : ''
   // An extension-provided node carries its owning extension's id (`ext:<id>:<module>`) - surface it
   // as a chip so it's clear which extension a canvas node came from.
@@ -495,7 +497,10 @@ export function GraphNode({ id, data, selected }: NodeProps): React.JSX.Element 
                 const stored = core.params?.[field.key]
                 // Empty means "engine auto-picks", which is the first file; show that rather than a
                 // blank select. Display only - the stored value stays empty until the user picks.
-                const fallback = field.default || opts[0]?.value || ''
+                // Not for a character: Core never auto-picks one, and showing the first as chosen
+                // meant picking it fired no change, so it could never be saved.
+                const fallback =
+                  field.optionsFrom === 'characters' ? '' : field.default || opts[0]?.value || ''
                 const selected = stored == null || stored === '' ? fallback : stored
                 // A pick the catalog lacks stays in the list, or the select renders blank and the
                 // name the graph arrived with is gone.

@@ -798,3 +798,50 @@ def test_training_never_resolves_the_pruned_int8_build(models_root: Path) -> Non
     assert reqs.resolve_video_vae(for_training=True).name == reqs.VIDEO_VAE_FILE
     training = {c.id: c for c in reqs.components("fl2va", pruned_substitutes=False)}
     assert not training["h3-video-vae"].optional or training["h3-video-vae"].present
+
+
+def test_a_cached_pipeline_is_reused_even_when_free_ram_looks_short(  # type: ignore[no-untyped-def]
+    models_root: Path, monkeypatch
+) -> None:
+    """The check ran before the cache lookup, so the pipeline already resident counted against
+    free RAM and a second render on the same model refused to start."""
+    pytest.importorskip("torch")
+    from inline_core.device.policy import Quantization
+    from inline_core.models import pipeline_runtime as rt
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    path = _fake_checkpoint(models_root / "diffusion_models" / reqs.FL2VA_FILE, _H3_PROBE)
+    for folder in ("MiniMax-H3-text-encoder", "MiniMax-H3-processor"):
+        (models_root / "text_encoders" / folder).mkdir(parents=True, exist_ok=True)
+    for name in (reqs.VIDEO_VAE_FILE, reqs.AUDIO_VAE_FILE):
+        (models_root / "vae").mkdir(parents=True, exist_ok=True)
+        (models_root / "vae" / name).write_bytes(b"")
+    monkeypatch.setattr(
+        pl.reqs, "footprint_bytes", lambda *_a, **_k: {"diffusion_bytes": 40e9, "vae_bytes": 1}
+    )
+    built: list[object] = []
+
+    def build(*_a: object, **_k: object) -> object:
+        built.append(object())
+        return built[-1]
+
+    monkeypatch.setattr(pl, "_build", build)
+
+    class Policy(_NullPolicy):
+        free_mb = 200 * 1024
+
+        def free_ram_mb(self) -> int:
+            return self.free_mb
+
+        def quantization(self) -> Quantization:
+            return Quantization.INT8
+
+    policy = Policy()
+    rt.PIPELINES.clear()
+    try:
+        first = pl.load_pipeline(policy, params={"model": path.name}, partition="fl2va")
+        policy.free_mb = 4 * 1024  # what the first pipeline itself now occupies
+        again = pl.load_pipeline(policy, params={"model": path.name}, partition="fl2va")
+        assert again is first and len(built) == 1
+    finally:
+        rt.PIPELINES.clear()

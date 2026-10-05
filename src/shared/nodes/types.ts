@@ -105,6 +105,8 @@ export interface AppliedCharacter {
   roles: string[]
   /** Prepended to the user's prompt; names the positions the refs land on. */
   promptPrefix: string
+  /** The character's voice as a data URI, when the endpoint asked for it and the character has one. */
+  voice?: string
 }
 
 /** Params alone cannot price a model that bills per reference image. */
@@ -169,6 +171,8 @@ export interface NodeDef {
     /** Name each role in the prompt. Needed once identity references are gone, or the text claims
      *  a photo of an outfit shows the character's face. */
     roleLines?: boolean
+    /** The audio port a character's voice joins, after the wired clips. Absent takes no voice. */
+    voicePort?: string
   }
   /** Pick the fal endpoint from the resolved inputs (e.g. text-to-image vs image-to-image). PURE. */
   resolveEndpoint(resolved: ResolvedInputs): string
@@ -233,6 +237,18 @@ export function withCharacterRefs(
   const wired = portMedia(def, resolved, portId)
   if (def.character?.port !== portId || !resolved.character) return wired
   return [...wired, ...resolved.character.refs].slice(0, def.character.maxImages)
+}
+
+/** Appended after the wired clips, whose `<Audio N>` numbers the user's prompt already names. */
+export function withCharacterVoice(
+  def: NodeDef,
+  resolved: ResolvedInputs,
+  portId: string,
+): string[] {
+  const wired = portMedia(def, resolved, portId)
+  const voice = resolved.character?.voice
+  if (def.character?.voicePort !== portId || !voice) return wired
+  return [...wired, voice]
 }
 
 /** The user's prompt with a wired character's binding text in front of it. */

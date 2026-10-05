@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { MissingModel } from '@shared/types'
-import { markPresent, preferredMatch } from './modelRegistryStore'
+import { hasUndismissed, markPresent, preferredMatch } from './modelRegistryStore'
 
 function model(id: string, filename: string) {
   return { id, label: filename, filename, category: 'vae', repo: 'r', path: filename }
@@ -49,5 +49,25 @@ describe('markPresent', () => {
 
   it('survives a closed popup', () => {
     expect(markPresent(null, 'a')).toBeNull()
+  })
+})
+
+const row = (path: string): MissingModel => ({ wanted: path, path, matches: [] })
+
+describe('missing-models popup', () => {
+  it('stays shut once every missing file has been dismissed', () => {
+    const dismissed = new Set(['vae/a.safetensors', 'text_encoders/b.safetensors'])
+    expect(hasUndismissed([row('vae/a.safetensors')], dismissed)).toBe(false)
+  })
+
+  it('opens again for a file the user has not seen', () => {
+    const dismissed = new Set(['vae/a.safetensors'])
+    expect(hasUndismissed([row('vae/a.safetensors'), row('loras/c.safetensors')], dismissed)).toBe(
+      true,
+    )
+  })
+
+  it('opens the first time', () => {
+    expect(hasUndismissed([row('vae/a.safetensors')], new Set())).toBe(true)
   })
 })

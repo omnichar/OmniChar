@@ -9,6 +9,34 @@ import type { MissingModel, RegistryModel } from '@shared/types'
 import { ipcErrorMessage } from '../lib/ipcError'
 import { studio } from '@/lib/studio'
 
+/** Files the user already closed the popup on; it only reopens for one they have not seen. */
+const DISMISSED_KEY = 'inline.missingModels.dismissed'
+
+function readDismissed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DISMISSED_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return new Set(
+      Array.isArray(parsed) ? parsed.filter((p): p is string => typeof p === 'string') : [],
+    )
+  } catch {
+    return new Set()
+  }
+}
+
+function writeDismissed(paths: Set<string>): void {
+  try {
+    localStorage.setItem(DISMISSED_KEY, JSON.stringify([...paths]))
+  } catch {
+    // Private mode or blocked storage: the popup simply stays quiet for this session only.
+  }
+}
+
+/** Opens only when a missing file has not been dismissed before. Pure, so it is testable. */
+export function hasUndismissed(missing: MissingModel[], dismissed: Set<string>): boolean {
+  return missing.some((row) => !dismissed.has(row.path))
+}
+
 export interface ModelRequest {
   filename: string
   category?: string
@@ -24,6 +52,8 @@ interface ModelRegistryState {
   missing: MissingModel[] | null
   /** What opened the popup, so the user knows why they are seeing it. */
   reason: string
+  /** Paths of missing files the user has closed the popup on. */
+  dismissed: Set<string>
   downloading: Record<string, { fraction: number; status: string }>
 
   load: (refresh?: boolean) => Promise<void>
@@ -42,6 +72,7 @@ export const useModelRegistryStore = create<ModelRegistryState>((set) => ({
   error: null,
   missing: null,
   reason: '',
+  dismissed: readDismissed(),
   downloading: {},
 
   load: async (refresh = false) => {
@@ -61,7 +92,9 @@ export const useModelRegistryStore = create<ModelRegistryState>((set) => ({
       const res = await studio().models.resolveMissing(wanted)
       if (!res.ok) return 0
       const missing = res.value.missing
-      if (missing.length > 0) set({ missing, reason })
+      if (hasUndismissed(missing, useModelRegistryStore.getState().dismissed)) {
+        set({ missing, reason })
+      }
       return missing.length
     } catch {
       // A registry that cannot be reached must never block placing a node.
@@ -69,7 +102,13 @@ export const useModelRegistryStore = create<ModelRegistryState>((set) => ({
     }
   },
 
-  dismiss: () => set({ missing: null, reason: '' }),
+  dismiss: () =>
+    set((s) => {
+      const dismissed = new Set(s.dismissed)
+      for (const row of s.missing ?? []) dismissed.add(row.path)
+      writeDismissed(dismissed)
+      return { missing: null, reason: '', dismissed }
+    }),
 
   download: async (modelId) => {
     set((s) => ({

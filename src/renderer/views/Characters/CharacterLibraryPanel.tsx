@@ -3,7 +3,7 @@ import type { CharacterSummary } from '@shared/types'
 import { useAssetStore } from '../../store/assetStore'
 import { useCharacterStore } from '../../store/characterStore'
 import { getAssetDragIds } from '../../lib/dnd'
-import { CloseIcon, DownloadIcon, EditIcon, PlusIcon } from '../../components/icons'
+import { CloseIcon, DownloadIcon, EditIcon, MicIcon, PlusIcon } from '../../components/icons'
 import { buildCharacterEditChain, buildCharacterStarter } from '../../lib/characterChains'
 import { useUiStore } from '../../store/uiStore'
 
@@ -130,8 +130,17 @@ function CharacterCard({
         />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-xs text-fg">{character.name}</span>
-          <span className="block truncate text-[10px] text-muted">
+          <span className="flex items-center gap-1 truncate text-[10px] text-muted">
             {character.refs} reference{character.refs === 1 ? '' : 's'}
+            {character.voiceSeconds != null && (
+              <span
+                title={`Voice, ${Math.round(character.voiceSeconds)}s. Applied on MiniMax H3 Reference to Video only.`}
+                className="flex items-center gap-0.5 text-violet-300"
+              >
+                <MicIcon className="h-3 w-3" />
+                voice
+              </span>
+            )}
           </span>
         </span>
       </button>

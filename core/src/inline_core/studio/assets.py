@@ -24,6 +24,7 @@ _KIND_BY_EXT = {
     ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".flac": "audio", ".ogg": "audio",
     ".aac": "audio",
 }
+AUDIO_SUFFIXES = tuple(ext for ext, kind in _KIND_BY_EXT.items() if kind == "audio")
 
 
 def _now() -> int:

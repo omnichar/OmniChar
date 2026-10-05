@@ -9,10 +9,11 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..characters import apply, encode, library, scoring, weights
 from ..characters import charfile as cf
+from ..characters import voice as vc
 
 logger = logging.getLogger("inline_core.studio.characters")
 
@@ -229,8 +230,19 @@ class Characters:
             )
         raw_roles = request.get("keepRoles")
         keep = tuple(str(r) for r in raw_roles) if raw_roles is not None else None
+        # Only an endpoint that declared an audio slot for it asks; every other gets no voice.
+        raw_voice = request.get("voice")
+        voice = cast(dict[str, Any], raw_voice) if isinstance(raw_voice, dict) else {}
+        # Only when the prompt has dialogue: beside a silent scene a voice can make them talk.
+        speaking = vc.wanted(vc.VOICE_AUTO, str(voice.get("prompt") or ""))
+        voice_position = int(voice.get("firstPosition") or 0) if speaking else 0
         applied = apply.char_apply(
-            file, encode.FAL_REF_ARCH, prefer="reference", limit=limit, keep_roles=keep
+            file,
+            encode.FAL_REF_ARCH,
+            prefer="reference",
+            limit=limit,
+            keep_roles=keep,
+            with_voice=voice_position > 0,
         )
         if applied is None or not applied.refs:
             # An endpoint that refuses a whole role leaves nothing to send from a character built
@@ -246,7 +258,7 @@ class Characters:
             raise ValueError(
                 f"{file} has no references to send. Add some on the canvas and write it again."
             )
-        return {
+        result: dict[str, Any] = {
             "name": applied.name,
             "refs": [file_to_data_uri(Path(ref.path or "")) for ref in applied.refs],
             "roles": list(applied.roles),
@@ -254,8 +266,12 @@ class Characters:
                 int(request.get("firstPosition") or 1),
                 style=str(request.get("style") or "ordinal"),
                 role_lines=bool(request.get("roleLines")),
+                voice_position=voice_position or None,
             ),
         }
+        if applied.voice is not None:
+            result["voice"] = file_to_data_uri(applied.voice)
+        return result
 
     def sweep_result(self, run_id: str) -> dict[str, Any]:
         """A sweep's findings, so a node still reports them after the page reloads."""
@@ -421,6 +437,7 @@ class Characters:
             "hints": encode.hints_for(manifest),
             "sizeBytes": path.stat().st_size if path.is_file() else 0,
             "needsRebuild": encode.needs_rebuild(manifest),
+            "voiceSeconds": vc.voice_seconds(manifest),
         }
 
 

@@ -16,6 +16,7 @@ from ..config import run_data_dir
 from ..takes import AssetRef
 from . import charfile as cf
 from . import encode, library
+from . import voice as vc
 
 logger = logging.getLogger("inline_core.characters")
 
@@ -34,6 +35,7 @@ class AppliedCharacter:
         lora: Path | None = None,
         lora_strength: float = 1.0,
         roles: list[str] | None = None,
+        voice: Path | None = None,
     ) -> None:
         self.name = name
         self.refs = refs
@@ -46,6 +48,8 @@ class AppliedCharacter:
         #: What it fuses at. Set on Attach Adapter, because an overfit adapter is only usable
         #: turned down and the character wire carries no controls of its own.
         self.lora_strength = lora_strength
+        #: The voice WAV, only when the caller asked for it.
+        self.voice = voice
 
     def _role_lines(self, first_position: int, style: str) -> str:
         """Sentences binding each role to the positions it actually landed on.
@@ -67,7 +71,11 @@ class AppliedCharacter:
         return out
 
     def prompt_prefix(
-        self, first_position: int, style: str = "ordinal", role_lines: bool = False
+        self,
+        first_position: int,
+        style: str = "ordinal",
+        role_lines: bool = False,
+        voice_position: int | None = None,
     ) -> str:
         """Text naming the positions the character lands on, so positional prompting resolves.
 
@@ -101,6 +109,12 @@ class AppliedCharacter:
         line = f"{which} {self.name}, the same character in every image."
         if role_lines:
             line += self._role_lines(first_position, style)
+        if voice_position is not None and self.voice is not None:
+            # The voice alone conditions only the sound; naming the lips is what asks for the sync.
+            line += (
+                f" <Audio {voice_position}> is {self.name}'s voice. {self.name} speaks in this"
+                " voice, lips moving in sync with every word."
+            )
         detail = " ".join(self.description.split())
         if not detail:
             return f"{line} "
@@ -141,6 +155,7 @@ def char_apply(
     limit: int | None = None,
     keep_roles: tuple[str, ...] | None = None,
     select: Sequence[int] | None = None,
+    with_voice: bool = False,
 ) -> AppliedCharacter | None:
     """How a character applies on ``arch``, or None when none is picked. An unreadable pick raises
     rather than silently generating the wrong person.
@@ -187,6 +202,8 @@ def char_apply(
         refs, roles = [refs[i] for i in kept], [roles[i] for i in kept]
     if limit is not None:
         refs, roles = _fit_roles(refs, roles, limit)
+    # After `_extract`, which replaces the digest directory wholesale on a cold cache.
+    voice = _extract_voice(doc, path) if with_voice else None
     return AppliedCharacter(
         doc.manifest.name or path.stem,
         refs,
@@ -194,7 +211,35 @@ def char_apply(
         lora if mode == "lora" else None,
         strength,
         roles=roles,
+        voice=voice,
     )
+
+
+def has_voice(chosen: str) -> bool:
+    """Whether a character carries a voice, for a node that cannot use one and must say so."""
+    path = library.resolve(str(chosen or "").strip())
+    return path is not None and vc.voice_of(cf.read(path).manifest) is not None
+
+
+def _extract_voice(doc: cf.CharDoc, path: Path) -> Path | None:
+    """The voice WAV on disk, or None when the character has none."""
+    if vc.voice_of(doc.manifest) is None:
+        return None
+    if not vc.payload_valid(doc.manifest) or vc.payload_bytes(doc) is None:
+        logger.info("Rebuilding the voice payload for %s", path.name)
+        vc.rebuild_payload(doc)
+        cf.write(path, doc)
+    data = vc.payload_bytes(doc)
+    if data is None:
+        raise vc.VoiceError(f"{path.name}'s voice payload is missing.")
+    # Keyed by the payload's own hash, so a re-attached voice never reuses a stale file.
+    target = _cache_root() / "voices" / f"{cf.sha256_bytes(data)}.wav"
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = target.with_suffix(".part")
+        staging.write_bytes(data)
+        staging.replace(target)
+    return target
 
 
 def _fit_roles(

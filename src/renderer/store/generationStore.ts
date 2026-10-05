@@ -19,6 +19,7 @@ import { studio } from '@/lib/studio'
 import { useFrameStore } from './frameStore'
 import { useMoodboardStore } from './moodboardStore'
 import { useModelRequirementsStore } from './modelRequirementsStore'
+import { useModelRegistryStore } from './modelRegistryStore'
 
 interface GenerationState {
   /** Per-frame "currently generating" flag. */
@@ -128,6 +129,7 @@ export const useGenerationStore = create<GenerationState>((set) => ({
         if (def.character && characterFile) {
           const wired = portMedia(def, inputs, def.character.port).length
           const excluded = def.character.excludeRoles ?? []
+          const voicePort = def.character.voicePort
           const applied = await studio().characters.applyFal({
             file: characterFile,
             limit: Math.min(def.character.maxRefs, def.character.maxImages - wired),
@@ -135,6 +137,14 @@ export const useGenerationStore = create<GenerationState>((set) => ({
             style: def.character.style,
             keepRoles: CHARACTER_ROLES.filter((role) => !excluded.includes(role)),
             roleLines: def.character.roleLines,
+            ...(voicePort
+              ? {
+                  voice: {
+                    firstPosition: portMedia(def, inputs, voicePort).length + 1,
+                    prompt: resolved.value.prompt ?? '',
+                  },
+                }
+              : {}),
           })
           if (!applied.ok) return fail(applied.error)
           inputs.character = applied.value
@@ -153,9 +163,21 @@ export const useGenerationStore = create<GenerationState>((set) => ({
           )
         }
         const runParams = { ...frame.params, prompt: resolved.value.prompt ?? '' }
+        const body = def.buildRequest(runParams, inputs)
+        // The prompt already names the voice, so a cap that cut it would leave the text pointing at nothing.
+        const voice = inputs.character?.voice
+        const voicePort = def.character?.voicePort
+        if (voice && voicePort) {
+          const sent = body[voicePort]
+          if (!Array.isArray(sent) || !sent.includes(voice)) {
+            return fail(
+              `${def.title} has no room left for the character's voice. Unwire a reference to make room.`,
+            )
+          }
+        }
         request = {
           endpoint: def.resolveEndpoint(inputs),
-          body: def.buildRequest(runParams, inputs),
+          body,
           outputKind: def.outputKind,
           characterFile,
         }
@@ -346,6 +368,10 @@ function openMissingModels(itemId: string, error: string): boolean {
   void useModelRequirementsStore
     .getState()
     .checkOnUse(nodeType, 'This node needs models before it can generate.')
+    .then(() => {
+      // Dismissed before, so the popup stays shut and the error has to say what is wrong instead.
+      if (!useModelRegistryStore.getState().missing) useGenerationStore.getState().setError(error)
+    })
   return true
 }
 

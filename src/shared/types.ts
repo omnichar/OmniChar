@@ -405,6 +405,8 @@ export interface CharacterSummary {
   sizeBytes?: number
   /** The references moved on from what scoring and the payload were built from. */
   needsRebuild?: boolean
+  /** Seconds of the stored voice payload; null or absent when the character has no voice. */
+  voiceSeconds?: number | null
   /** Set when the file could not be read. The row is still listed, so a corrupt file is visible. */
   error?: string
 }

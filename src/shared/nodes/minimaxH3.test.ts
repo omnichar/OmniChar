@@ -177,6 +177,43 @@ describe('MiniMax H3 · reference → video', () => {
     // 9 + 3 already fills the 12-file budget, so audio yields.
     expect(body.reference_audio_urls).toBeUndefined()
   })
+
+  const voiced = (audios: string[]): ResolvedInputs => ({
+    ...emptyResolvedInputs(),
+    images: ['data:i'],
+    audios,
+    character: {
+      name: 'Ada',
+      refs: ['data:ref'],
+      roles: ['face'],
+      promptPrefix: '<Picture 2> shows Ada. <Audio 2> is Ada’s voice. ',
+      voice: 'data:voice',
+    },
+  })
+
+  it('appends a character’s voice after the wired audio', () => {
+    expect(MINIMAX_H3_REF2V.character?.voicePort).toBe('reference_audio_urls')
+    const body = MINIMAX_H3_REF2V.buildRequest({ prompt: 'p' }, voiced(['data:s']))
+    expect(body.reference_audio_urls).toEqual(['data:s', 'data:voice'])
+    expect(body.reference_image_urls).toEqual(['data:i', 'data:ref'])
+  })
+
+  it('cuts the voice first when the audio cap bites', () => {
+    const body = MINIMAX_H3_REF2V.buildRequest({ prompt: 'p' }, voiced(['a', 'b', 'c']))
+    expect(body.reference_audio_urls).toEqual(['a', 'b', 'c'])
+  })
+
+  it('sends no voice for a character without one', () => {
+    const resolved = voiced(['data:s'])
+    delete resolved.character?.voice
+    const body = MINIMAX_H3_REF2V.buildRequest({ prompt: 'p' }, resolved)
+    expect(body.reference_audio_urls).toEqual(['data:s'])
+  })
+
+  it('is the only H3 endpoint that takes a voice', () => {
+    expect(MINIMAX_H3_T2V.character?.voicePort).toBeUndefined()
+    expect(MINIMAX_H3_I2V.character?.voicePort).toBeUndefined()
+  })
 })
 
 describe('H3 registry wiring', () => {

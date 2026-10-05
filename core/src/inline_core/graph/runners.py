@@ -51,6 +51,13 @@ class VideoInputRunner(NodeRunner):
         return NodeResult(outputs={"video": _asset_ref(node.params.get("asset"))})
 
 
+class AudioInputRunner(NodeRunner):
+    produces_takes = False
+
+    def run(self, node: Node, inputs: dict[str, list[Any]], ctx: ExecutionContext) -> NodeResult:
+        return NodeResult(outputs={"audio": _asset_ref(node.params.get("asset"))})
+
+
 def _asset_ref(raw: Any) -> AssetRef:
     if isinstance(raw, dict):
         ref = raw.get("ref")
@@ -87,4 +94,13 @@ VIDEO_INPUT = NodeDescriptor(
     category="Input",
     outputs=(Port("video", "Video", PortKind.VIDEO),),
     icon="film",
+)
+
+#: Typed as audio so a wired voice clip reaches an audio port instead of failing as an image.
+AUDIO_INPUT = NodeDescriptor(
+    type="input/audio",
+    title="Audio",
+    category="Input",
+    outputs=(Port("audio", "Audio", PortKind.AUDIO),),
+    icon="music",
 )

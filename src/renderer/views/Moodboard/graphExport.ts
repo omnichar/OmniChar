@@ -63,6 +63,8 @@ function effectiveParams(core: {
   for (const field of descriptor.params) {
     const value = stored[field.key]
     if (value !== undefined && value !== null && value !== '') continue
+    // The engine resolves an empty weights picker but refuses an empty character one.
+    if (field.optionsFrom === 'characters') continue
     const resolved = field.default !== '' ? field.default : field.options?.[0]?.value
     if (resolved !== undefined && resolved !== null && resolved !== '') {
       stored[field.key] = resolved

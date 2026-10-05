@@ -21,6 +21,7 @@ from typing import Any
 
 from . import frames as fr
 from . import moodboard as mb
+from .assets import AUDIO_SUFFIXES
 
 #: Item types whose input edges the outer pass resolves. Everything else is a frozen source.
 _WIRED_TYPES = ("core", "train/caption", "train/lora")
@@ -38,22 +39,27 @@ def _source_output_port(
     # match the node `_item_to_node` emits, or the edge names an output that does not exist.
     if source and source["type"] in ("asset", "frame", "loader", "controlSpace"):
         path = source_path(source) if source_path else None
-        return "video" if path and _source_type(path) == "input/video" else "image"
+        return _source_type(path).removeprefix("input/") if path else "image"
     return source_handle or "out"  # a 'core' item's handles already are Core port ids
 
 
-#: Suffixes the video source node claims. Everything else stays an image, which is what the image
-#: ports and the list ports expect.
+#: Suffixes the video and audio source nodes claim. Everything else stays an image, which is what
+#: the image ports and the list ports expect.
 _VIDEO_SUFFIXES = (".mp4", ".mov", ".webm", ".mkv", ".avi")
 
 
 def _source_type(path: str) -> str:
-    """`input/video` for a clip, `input/image` otherwise.
+    """`input/video` for a clip, `input/audio` for a sound, `input/image` otherwise.
 
     Every asset used to arrive as `input/image` whatever it held, so wiring a clip into a video port
     failed validation with "Cannot wire image into video" about a file that was already a video.
     """
-    return "input/video" if Path(path).suffix.lower() in _VIDEO_SUFFIXES else "input/image"
+    suffix = Path(path).suffix.lower()
+    if suffix in _VIDEO_SUFFIXES:
+        return "input/video"
+    if suffix in AUDIO_SUFFIXES:
+        return "input/audio"
+    return "input/image"
 
 
 def _loader_assets(item: dict[str, Any] | None) -> list[str]:

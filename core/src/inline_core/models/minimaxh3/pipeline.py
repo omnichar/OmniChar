@@ -151,7 +151,6 @@ def load_pipeline(
     fit = policy.fit_estimate()
     if fit is not None and not fit.fits:
         raise ComponentError(rt.wont_fit_message(fit))
-    _check_host_ram(policy, sizes, fit, quantize=quantize)
 
     key = rt.PipelineKey(
         arch="minimax-h3",
@@ -176,6 +175,10 @@ def load_pipeline(
             logger.info("MiniMax H3 pipeline cache hit (%s)", partition)
             return cached
         rt.PIPELINES.evict_stale(key)
+        # After the hit and the eviction: checked before them, the cached pipeline being replaced
+        # (or reused outright) counted against free RAM, and a second render refused to start.
+        _trim_heap()
+        _check_host_ram(policy, sizes, fit, quantize=quantize)
         pipe = _build(
             policy,
             partition=partition,
@@ -529,6 +532,19 @@ def render_staged(pipe: Any, device: Any, cancel_check: Any = None, **call: Any)
         return state
     finally:
         rt.free_vram()
+
+
+def _trim_heap() -> None:
+    """Return freed heap to the OS so free RAM reflects an eviction; glibc keeps it otherwise."""
+    import ctypes
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass  # musl or another libc: the check just sees the conservative number
 
 
 def _reclaim() -> None:

@@ -101,6 +101,25 @@ class PreparedVoice:
     seconds: float
 
 
+def sniff_suffix(data: bytes) -> str | None:
+    """The audio format a file's magic bytes name, or None. Only the formats the library imports."""
+    head = data[:12]
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return ".wav"
+    if head[:4] == b"fLaC":
+        return ".flac"
+    if head[:4] == b"OggS":
+        return ".ogg"
+    if head[4:8] == b"ftyp":
+        return ".m4a"
+    if head[:3] == b"ID3":
+        return ".mp3"
+    if len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0:
+        # Both are a bare frame sync; ADTS sets layer bits 00, MPEG audio never does.
+        return ".aac" if head[1] & 0x06 == 0 else ".mp3"
+    return None
+
+
 def prepare(sample: bytes, source_name: str) -> PreparedVoice:
     """Check and normalise an upload before anything is written."""
     if len(sample) > MAX_SAMPLE_BYTES:
@@ -108,9 +127,12 @@ def prepare(sample: bytes, source_name: str) -> PreparedVoice:
             f"That voice sample is {len(sample) // 1024**2} MB; the limit is "
             f"{MAX_SAMPLE_BYTES // 1024**2} MB. About 30 seconds of speech is all it needs."
         )
-    suffix = Path(source_name).suffix.lower()
     from ..studio.assets import AUDIO_SUFFIXES
 
+    suffix = Path(source_name).suffix.lower()
+    # A `/v1/assets` upload is stored as `sha256-<hex>` with no suffix, so the bytes decide.
+    if suffix not in AUDIO_SUFFIXES:
+        suffix = sniff_suffix(sample) or suffix
     if suffix not in AUDIO_SUFFIXES:
         raise VoiceError(
             f"{Path(source_name).name or 'That file'} is not a supported audio file "

@@ -577,3 +577,43 @@ def test_an_mp3_sample_is_accepted(tmp_path) -> None:
     subprocess.run([exe, "-y", "-loglevel", "error", "-i", str(wav), str(mp3)], check=True)
     prepared = vc.prepare(mp3.read_bytes(), "voice.mp3")
     assert prepared.suffix == ".mp3" and 4.0 < prepared.seconds < 5.5
+
+
+def test_a_voice_stored_without_a_suffix_is_read_from_its_bytes(tmp_path) -> None:
+    """`/v1/assets` keeps uploads as `sha256-<hex>`, so a cloud voice has no suffix to go by."""
+    _needs_ffmpeg()
+    import subprocess
+
+    from inline_core.studio.timeline.ffmpeg import ffmpeg_exe
+
+    wav = _wav(5.0)
+    assert vc.prepare(wav, "sha256-abc").suffix == ".wav"
+    source = tmp_path / "in.wav"
+    source.write_bytes(wav)
+    mp3 = tmp_path / "out.mp3"
+    exe = ffmpeg_exe()
+    assert exe is not None
+    subprocess.run([exe, "-y", "-loglevel", "error", "-i", str(source), str(mp3)], check=True)
+    assert vc.prepare(mp3.read_bytes(), "sha256-def").suffix == ".mp3"
+
+
+@pytest.mark.parametrize(
+    ("head", "suffix"),
+    [
+        (b"RIFF\x00\x00\x00\x00WAVE", ".wav"),
+        (b"ID3\x04\x00\x00\x00\x00\x00\x00\x00\x00", ".mp3"),
+        (b"\xff\xfb\x90\x00", ".mp3"),
+        (b"\xff\xf1\x50\x80", ".aac"),
+        (b"fLaC\x00\x00\x00\x22", ".flac"),
+        (b"OggS\x00\x02\x00\x00", ".ogg"),
+        (b"\x00\x00\x00\x20ftypM4A ", ".m4a"),
+        (b"\x89PNG\r\n\x1a\n", None),
+    ],
+)
+def test_sniffing_names_each_supported_format(head: bytes, suffix: str | None) -> None:
+    assert vc.sniff_suffix(head) == suffix
+
+
+def test_a_non_audio_file_without_a_suffix_is_still_refused() -> None:
+    with pytest.raises(vc.VoiceError, match="not a supported audio file"):
+        vc.prepare(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32, "sha256-abc")

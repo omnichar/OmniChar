@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from safetensors import safe_open
 
 from ...errors import ComponentError
 from .. import lora as lora_module
@@ -150,8 +149,11 @@ def load_transformer(
     strength: list[float] = []
     shrink = _fusing_shrink(lora_plan, fused, shrink, strength) if lora_plan else shrink
 
-    with safe_open(str(path), framework="pt") as handle:
-        source_keys = list(handle.keys())  # noqa: SIM118 - safe_open has no __contains__
+    # Byte-range reads, never safe_open: its whole-file mapping is charged in full against Windows'
+    # commit limit, and a 62 GB checkpoint on a 64 GB machine crashed with an access violation.
+    with CheckpointReader(path) as handle:
+        source_keys = sorted(handle.keys())
+        shapes = handle.shapes()
         if _PROBE_KEY not in source_keys:
             raise ComponentError(
                 f"{path.name} has no {_PROBE_KEY}, so it is not a MiniMax H3 transformer."
@@ -163,11 +165,11 @@ def load_transformer(
             num_refiner_blocks=int(model.config.num_refiner_layers),
             head_dim=int(model.config.attention_head_dim),
         )
-        int8 = int8_layers_of(CheckpointReader(path), path.name)
+        int8 = int8_layers_of(handle, path.name)
         int8_scales = {
             f"{layer}.weight": load_scale(
                 handle.get_tensor(layer + SCALE_SUFFIX),
-                handle.get_slice(f"{layer}.weight").get_shape()[0],
+                shapes[f"{layer}.weight"][0],
             )
             for layer in int8
         }
@@ -375,7 +377,7 @@ def _stream_into(
     """
     filled: set[str] = set()
     pending: str | None = None
-    for key in sorted(handle.keys()):  # noqa: SIM118 - sorted so a block's tensors arrive together
+    for key in sorted(handle.keys()):  # sorted so a block's tensors arrive together
         action = plan.actions[key]
         if isinstance(action, AssertEqual):
             # Checked against what the port computes, then **placed**: the buffer was created on
@@ -481,8 +483,8 @@ def iter_remapped(
     Used by the numerics gate and by the prepared-weight builder, both of which want the transformed
     stream rather than a populated module.
     """
-    with safe_open(str(path), framework="pt") as handle:
-        for index, key in enumerate(handle.keys()):  # noqa: SIM118
+    with CheckpointReader(path) as handle:
+        for index, key in enumerate(sorted(handle.keys())):
             if limit is not None and index >= limit:
                 return
             action = plan.actions[key]

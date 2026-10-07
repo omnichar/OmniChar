@@ -596,11 +596,7 @@ def _is_nvfp4(path: Path) -> bool:
 
 
 def _nvfp4_marked(path: Path) -> bool:
-    from safetensors import safe_open
-
-    with safe_open(str(path), framework="pt") as handle:
-        keys: list[str] = list(handle.keys())
-    return any(key.endswith("comfy_quant") for key in keys)
+    return any(key.endswith("comfy_quant") for key in CheckpointReader(path).keys())
 
 
 def _encoder_source(path: Path) -> Path:
@@ -1061,11 +1057,11 @@ def _adaln_basis(source: Path, rank: int | None = None) -> Any:
     are read, about 60 MB of a 66 GB file.
     """
     from diffusers.models.embeddings import TimestepEmbedding, Timesteps
-    from safetensors import safe_open
 
     from . import adaln as adaln_mod
 
-    with safe_open(str(source), framework="pt") as handle:
+    # These tensors sit at the end of a 62 GB file; mapping it all to reach them crashed Windows.
+    with CheckpointReader(source) as handle:
         get = handle.get_tensor
         proj_in = get("time_embedder.proj_in.weight")
         proj_out = get("time_embedder.proj_out.weight")

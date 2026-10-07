@@ -273,6 +273,8 @@ distilled build afterwards. **Krea 2** and **Z-Image** are covered in TRAINING.m
 Already installed with `--extra all`? The trainer is ready. Otherwise
 `./webui.sh --install --extra training`.
 
+**Windows:** MiniMax H3 training maps the whole 62 GB bf16 checkpoint into memory. On a 64 GB machine it crashed with a 64 GB page file on each of two drives and ran with 128 GB on each.
+
 **[TRAINING.md](TRAINING.md) is the full reference:**
 [which base to train on](TRAINING.md#architecture-and-base-model-modes) ·
 [benchmarks](TRAINING.md#benchmark-results) ·

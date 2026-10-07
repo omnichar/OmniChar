@@ -449,3 +449,56 @@ def test_an_unquantised_base_says_so(caplog) -> None:  # type: ignore[no-untyped
     with caplog.at_level(logging.INFO, logger="inline_core.minimaxh3"):
         h3_load._report_strength([0.02, 1.5], quantised=False)
     assert "not quantised" in caplog.text
+
+
+# --- reading the file -----------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def no_mapping(monkeypatch):  # type: ignore[no-untyped-def]
+    """safe_open maps the whole file; on Windows a 62 GB mapping crashed with an access fault."""
+    import safetensors
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the H3 checkpoint was opened with safe_open")
+
+    monkeypatch.setattr(safetensors, "safe_open", refuse)
+    # A module-level `from safetensors import safe_open` would keep the real one past the patch.
+    from inline_core.models.minimaxh3 import load as load_module
+
+    assert "safe_open" not in vars(load_module)
+
+
+def test_the_transformer_loads_without_mapping_the_file(  # type: ignore[no-untyped-def]
+    reference, no_mapping
+) -> None:
+    path, original = reference(RowLayout.CONTIGUOUS)
+    recovered = load_transformer(path, dtype=torch.float32).state_dict()
+    assert all(torch.equal(recovered[k], v) for k, v in original.items())
+
+
+def test_the_training_basis_is_read_without_mapping_the_file(  # type: ignore[no-untyped-def]
+    reference, no_mapping
+) -> None:
+    pytest.importorskip("diffusers")
+    from inline_core.models.minimaxh3.pipeline import _adaln_basis
+
+    path, _ = reference(RowLayout.CONTIGUOUS)
+    assert _adaln_basis(path) is not None
+
+
+def test_byte_range_reads_match_safetensors_for_fp8(tmp_path: Path) -> None:
+    """frombuffer has no fp8 path, so these are read as bytes and reinterpreted."""
+    from safetensors.torch import load_file, save_file
+
+    from inline_core.models.checkpoint import CheckpointReader
+
+    codes = torch.tensor([[0.5, -1.0, 2.0], [4.0, -0.25, 8.0]]).to(torch.float8_e4m3fn)
+    path = tmp_path / "fp8.safetensors"
+    save_file({"w": codes, "e5": codes.to(torch.float8_e5m2)}, str(path))
+    want = load_file(str(path))
+    with CheckpointReader(path) as reader:
+        for key in ("w", "e5"):
+            got = reader.get_tensor(key)
+            assert got.dtype == want[key].dtype and got.shape == want[key].shape
+            assert torch.equal(got.view(torch.uint8), want[key].view(torch.uint8))

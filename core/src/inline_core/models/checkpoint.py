@@ -31,6 +31,9 @@ _DTYPE_NAMES = {
     "I8": "int8",
     "U8": "uint8",
     "BOOL": "bool",
+    # MiniMax H3's fp8 build. Read as bytes and reinterpreted, because frombuffer has no fp8 path.
+    "F8_E4M3": "float8_e4m3fn",
+    "F8_E5M2": "float8_e5m2",
 }
 
 
@@ -118,7 +121,11 @@ class CheckpointReader:
             handle.seek(self._start + start)
             if handle.readinto(buffer) != len(buffer):
                 raise ComponentError(f"Checkpoint {self._path.name} is truncated at {key!r}.")
-        tensor = torch.frombuffer(buffer, dtype=getattr(torch, dtype_name))
+        target = getattr(torch, dtype_name)
+        if dtype_name.startswith("float8"):
+            tensor = torch.frombuffer(buffer, dtype=torch.uint8).view(target)
+        else:
+            tensor = torch.frombuffer(buffer, dtype=target)
         tensor = tensor.reshape(entry["shape"]) if entry["shape"] else tensor.reshape(())
         return tensor.to(device) if device else tensor
 

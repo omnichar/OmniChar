@@ -372,7 +372,7 @@ def _load_nvfp4_conditioner(path: Path, device: str, dtype: Any) -> Any:
     from ..device.memory import MemoryPolicy
     from ..models import pipeline_runtime as rt
     from ..models.minimaxh3 import requirements as reqs
-    from ..models.minimaxh3.pipeline import _load_nvfp4_encoder
+    from ..models.minimaxh3.pipeline import _load_packed_encoder
 
     need = reqs.encoder_resident_bytes(path) / 1e9
     free_vram = (rt.free_vram_bytes(device) or 0) / 1e9
@@ -384,7 +384,7 @@ def _load_nvfp4_conditioner(path: Path, device: str, dtype: Any) -> Any:
                 f"system RAM. This machine has {free_vram:.0f} GB free on the card and "
                 f"{free_ram_mb / 1024:.0f} GB of free RAM."
             )
-    model = _load_nvfp4_encoder(path, dtype)
+    model = _load_packed_encoder(path, dtype)
     return model.to(device) if free_vram >= need + _RAM_HEADROOM_GB else model
 
 

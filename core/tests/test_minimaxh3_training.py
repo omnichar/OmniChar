@@ -487,3 +487,25 @@ def test_the_loop_reports_training_before_the_first_step(monkeypatch) -> None:
     enters_loop = source.index("for step in range(start, steps):")
     announces = source.index('status="training"')
     assert announces < enters_loop, "the training status must be sent before the loop, not after"
+
+
+def test_training_loads_the_packed_conditioner_through_the_generation_loader(monkeypatch, tmp_path):
+    """A rename of the generation loader left training importing a name that no longer existed,
+    which failed every nvfp4 run right after latent caching, on every machine."""
+    pytest.importorskip("torch")
+    from inline_core.models import pipeline_runtime as rt
+    from inline_core.models.minimaxh3 import pipeline, requirements
+    from inline_core.training import h3
+
+    loaded: list[object] = []
+
+    class Model:
+        def to(self, device: str) -> Model:
+            loaded.append(device)
+            return self
+
+    monkeypatch.setattr(pipeline, "_load_packed_encoder", lambda path, dtype: Model())
+    monkeypatch.setattr(requirements, "encoder_resident_bytes", lambda path: 1)
+    monkeypatch.setattr(rt, "free_vram_bytes", lambda device: 64 * 1024**3)
+    model = h3._load_nvfp4_conditioner(tmp_path / "encoder.safetensors", "cuda:0", None)
+    assert isinstance(model, Model) and loaded == ["cuda:0"]

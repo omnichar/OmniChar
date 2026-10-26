@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..characters import continuity
 from ..graph.schema import is_list_kind, parse_graph
 from ..runtime.progress import (
     CancelledEvent,
@@ -252,34 +253,11 @@ class CoreGeneration:
         cast = [str(n) for n in listed if str(n).strip()]
         if len(cast) > 1:
             return self._cast_continuity(cast, path)
-        result = self._characters.score_take(path, chosen)
-        if result is None:
-            # Measured nothing. Record the character anyway so the UI can say which one was used.
-            return {"characterId": chosen}
-        out = {
-            "characterId": chosen,
-            "continuityScore": result["score"],
-            # False when the number is the face alone, so a dropped term is never hidden.
-            "continuityFaceOnly": not result.get("subjectCounted", True),
-        }
-        # Only a video carries this: a score from two sampled frames is not the same claim as one
-        # from five, and the reader cannot tell them apart from the number.
-        if result.get("frames"):
-            out["continuityFrames"] = result["frames"]
-        return out
+        return continuity.from_take(chosen, self._characters.score_take(path, chosen))
 
     def _cast_continuity(self, cast: list[str], path: Path) -> dict[str, Any]:
         """The worst member's score as the headline, beside every member's own and any swaps."""
-        result = self._characters.score_cast(path, cast)
-        if result is None:
-            return {"characterId": cast[0]}
-        scores = [p["score"] for p in result["perCharacter"] if p["score"] is not None]
-        out: dict[str, Any] = {"characterId": cast[0], "castContinuity": result}
-        if scores:
-            # The weakest member, because a cast is only as continuous as its least-held face.
-            out["continuityScore"] = min(scores)
-            out["continuityFaceOnly"] = True
-        return out
+        return continuity.from_cast(cast, self._characters.score_cast(path, cast))
 
     def _save_take(self, item_id: str, take: Any, ref: Any) -> None:
         """Copy a take's bytes into the project's takes/ dir and set its Core node's output. Image

@@ -268,6 +268,7 @@ def openapi_tags(rpc: RpcRouter) -> list[dict[str, Any]]:
 _UNCOLLECTED = (
     schemas.SubmitRunIn,
     schemas.RpcCallIn,
+    schemas.ScoreTakeIn,
     schemas.ProgressEventOut,
     schemas.NodeDoneEventOut,
     schemas.RunStartedEventOut,

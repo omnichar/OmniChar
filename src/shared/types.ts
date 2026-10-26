@@ -381,8 +381,37 @@ export interface TakeContinuity {
   continuityMin?: number
   /** Video: when that worst frame occurred, in seconds. */
   continuityMinAt?: number
+  /** Video: every sampled frame behind the median, so the dip can be jumped to. */
+  continuitySamples?: { at: number; score: number }[]
+  /** The face term (SFace) behind the blend, or absent when no face answered. */
+  continuityFace?: number
+  /** The subject term (DINOv2) behind the blend, or absent when it was not counted. */
+  continuitySubject?: number
   /** Which gallery the identity term was measured against. */
   continuityGallery?: 'frozen' | 'refs'
+  /** How far this take's framing sits from the references'. Past `SUBJECT_FRAMING_RATIO` the
+   * subject term is dropped, so a wide shot reads as face-only rather than as a bad match. */
+  continuityFraming?: number
+  /** Every cast member's own score, when more than one character was applied. The headline above
+   * is the weakest of them, because a cast is only as continuous as its least-held face. */
+  castContinuity?: CastContinuity
+}
+
+/** `score_cast`'s summary: faces matched one-to-one, so a swap is reportable. */
+export interface CastContinuity {
+  perCharacter: {
+    file: string
+    name: string
+    /** Null is "this face was never found", not a zero. */
+    score: number | null
+    missingFrames: number
+    swappedFrames: number
+  }[]
+  /** The files whose face appears to have been given to another character. */
+  swapped: string[]
+  /** Faces found that belong to no cast member. */
+  unmatched: number
+  frames: number
 }
 
 /** One saved character in `models/characters/`, as the library panel lists it. */

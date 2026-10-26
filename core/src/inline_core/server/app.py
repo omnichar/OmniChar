@@ -41,6 +41,7 @@ from .rpc import EventBroadcaster, RpcRouter
 from .run_store import RunStore
 from .schemas import (
     AssetStoredOut,
+    ContinuityOut,
     DescriptorOut,
     ErrorOut,
     HealthOut,
@@ -442,6 +443,53 @@ def create_app(
         if not _within(takes_root, path) or not path.is_file():
             return _error("not_found", "Take bytes are not available.", 404)
         return FileResponse(path)
+
+    @app.post(
+        "/v1/takes/{take_id}/score",
+        tags=["Takes"],
+        summary="Score take continuity",
+        response_model=ContinuityOut,
+        responses={404: {"model": ErrorOut, "description": "No take, or its bytes are gone."}},
+        openapi_extra={"requestBody": json_body("ScoreTakeIn")},
+    )
+    async def score_take(take_id: str, request: Request) -> Response:
+        """Identity match against the character the take was made with.
+
+        Mounted outside the studio gate below because a cloud worker has no studio store, and
+        `Characters` needs neither store nor events to score; `studio/finetune.py` relies on that
+        already.
+        """
+        body = await request.json()
+        if not isinstance(body, dict):
+            return _error("invalid_request", "A JSON object is required.", 422)
+        listed = body.get("characters")
+        if not isinstance(listed, list):
+            return _error("invalid_request", "'characters' must be a list of names.", 422)
+        cast = [n.strip() for n in listed if isinstance(n, str) and n.strip()]
+        if not cast:
+            return _error("unprocessable", "No character to score against.", 422)
+        # `library.resolve` joins a name onto the characters dir unchanged, so a name carrying a
+        # path is refused here rather than rewritten into one that happens to resolve.
+        if any("/" in name or "\\" in name or name.startswith(".") for name in cast):
+            return _error("invalid_request", "A character is named by file name only.", 422)
+        take = manager.find_take(take_id)
+        if take is None:
+            return _error("not_found", f"No take {take_id!r}.", 404)
+        path = Path(take.uri)
+        if not _within(takes_root, path) or not path.is_file():
+            return _error("not_found", "Take bytes are not available.", 404)
+        # Scoring is metadata about a render that already happened, so it never raises: both
+        # score_take and score_cast swallow their own failures and answer None.
+        from ..characters import continuity
+        from ..studio.characters import Characters
+
+        scorer = Characters(store=None, events=None)
+        scored = (
+            continuity.from_cast(cast, scorer.score_cast(path, cast))
+            if len(cast) > 1
+            else continuity.from_take(cast[0], scorer.score_take(path, cast[0]))
+        )
+        return JSONResponse(scored)
 
     @app.websocket("/v1/runs/{run_id}/events")
     async def run_events(websocket: WebSocket, run_id: str) -> None:

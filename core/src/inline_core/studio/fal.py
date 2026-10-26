@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ..characters import library
+from ..characters import continuity, library
 from . import frames as fr
 from . import moodboard as mb
 from .activity import ActivityRun
@@ -388,36 +388,7 @@ class FalGeneration:
         """`characterId` + what scoring measured, or just the character when nothing measured."""
         if not chosen or self._characters is None:
             return {}
-        result = self._characters.score_take(path, chosen)
-        if not result or result.get("score") is None:
-            # How much of a clip could not be read is a fact even when none of it scored.
-            blind = (result or {}).get("noFace")
-            return {"characterId": chosen, **({"continuityNoFace": blind} if blind else {})}
-        out: dict[str, Any] = {
-            "characterId": chosen,
-            "continuityScore": result["score"],
-            "continuityFaceOnly": not result.get("subjectCounted", True),
-            "continuityGallery": result.get("gallery"),
-            # No face behind the number means DINOv2 answered alone, which measures framing rather
-            # than identity - the one thing it must never be read as.
-            "continuitySubjectOnly": not result.get("faceBearing", True),
-        }
-        # Only where the clothes were in frame: on a close-up the number means "not visible", and
-        # showing that beside an identity score reads as the wardrobe having failed.
-        if result.get("wardrobeCounted"):
-            out["continuityWardrobe"] = result["wardrobeScore"]
-        # Video only: a distribution is a different claim from a number, and the reader cannot tell
-        # them apart from the headline alone.
-        for key, field in (
-            ("frames", "continuityFrames"),
-            ("noFace", "continuityNoFace"),
-            ("mean", "continuityMean"),
-            ("min", "continuityMin"),
-            ("minAt", "continuityMinAt"),
-        ):
-            if result.get(key) is not None:
-                out[field] = result[key]
-        return out
+        return continuity.from_take(chosen, self._characters.score_take(path, chosen))
 
     def cancel(self, frame_id: str | None = None) -> None:
         for fid in [frame_id] if frame_id else list(self._active.keys()):

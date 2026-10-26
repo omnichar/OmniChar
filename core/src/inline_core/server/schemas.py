@@ -70,6 +70,36 @@ class TakeOut(_Out):
     createdAt: float
 
 
+class ContinuityOut(_Out):
+    """How closely a take matched the character it was made with. Never a quality score.
+
+    Every field is optional on purpose: absent means "not measured", which is a different fact
+    from a low score and must never be read as zero.
+    """
+
+    characterId: str | None = None
+    continuityScore: float | None = None
+    continuityFaceOnly: bool | None = None
+    continuitySubjectOnly: bool | None = None
+    # The two terms behind the blend. Null is "that encoder had nothing to answer with".
+    continuityFace: float | None = None
+    continuitySubject: float | None = None
+    continuityWardrobe: float | None = None
+    continuityGallery: str | None = None
+    # How far the take's framing sits from the gallery's. A wide shot scores lower for
+    # framing, not for identity, so this is reported rather than folded into the score.
+    continuityFraming: float | None = None
+    # Video: the distribution behind the headline. A median hides a visible identity break.
+    continuityFrames: int | None = None
+    continuityNoFace: int | None = None
+    continuityMean: float | None = None
+    continuityMin: float | None = None
+    continuityMinAt: float | None = None
+    # The sampled frames behind the median, so a reader can jump to the dip.
+    continuitySamples: list[dict[str, float]] | None = None
+    castContinuity: dict[str, Any] | None = None
+
+
 class NodeStateOut(_Out):
     state: str
     fraction: float
@@ -230,6 +260,12 @@ class SubmitRunIn(_Out):
     # The same clientRunId replays the first run; a different graph under it is a 409.
     clientRunId: str | None = None
     meta: dict[str, Any] | None = None
+
+
+class ScoreTakeIn(_Out):
+    """Which character(s) the take was made with. More than one scores it as a cast."""
+
+    characters: list[str] = Field(default_factory=list)
 
 
 class RpcCallIn(_Out):

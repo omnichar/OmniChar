@@ -558,3 +558,17 @@ def test_a_character_with_no_wardrobe_references_has_no_wardrobe_score() -> None
 
 def test_garment_bands_are_dropped_when_the_image_is_too_small_to_hold_one() -> None:
     assert scoring.garment_crops(_flat((0, 0, 0), size=(20, 20))) == []
+
+
+def test_a_longer_clip_is_measured_on_more_points_up_to_the_cap() -> None:
+    """The curve is read as a shape, so the number of points follows the length of the clip.
+
+    Both ends are clamped: a one-second clip would otherwise be described by two points, and a
+    minute-long one by a hundred and twenty full encoder passes nobody reads."""
+    from inline_core.studio import characters as sc
+
+    # The measured span is the clip minus the half second trimmed off each end.
+    assert sc._sample_count(1.0) == sc.SCORE_FRAMES
+    assert sc._sample_count(5.0) == 8
+    assert sc._sample_count(10.0) == 18
+    assert sc._sample_count(60.0) == sc.SCORE_FRAMES_MAX

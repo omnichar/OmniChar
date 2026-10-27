@@ -7,6 +7,7 @@ open project may have changed by the time it returns. CPU-only, so it can run du
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any, cast
@@ -30,16 +31,30 @@ PROGRESS_EVENT = "events:characterProgress"
 #: Takes whose score has to come from frames rather than from the file itself.
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv"}
 
-#: How many frames a video take is measured on. Each one costs a full SFace + DINOv2 pass, and this
-#: runs inline while the take is saved, so it buys robustness rather than precision.
+#: The fewest frames a video take is measured on, which is also what a clip too short to fill the
+#: rate gets. Each one costs a full SFace + DINOv2 pass on CPU.
 SCORE_FRAMES = 5
+
+#: The most, because the curve is read as a shape and a longer clip earns more of it than a shorter
+#: one. Past this the extra passes buy resolution nobody reads.
+SCORE_FRAMES_MAX = 20
+
+#: Samples per second of measured clip, so length and not a constant decides how many points there
+#: are: 5s lands on 8, and anything from 10s up is capped.
+_SAMPLES_PER_SECOND = 2.0
 
 #: Skipped at each end, where a video is least settled and a low score would say more about the
 #: first moments than about the character.
 _EDGE_SECONDS = 0.5
 
 
-def _sample_frames(src: Path, count: int = SCORE_FRAMES) -> list[tuple[float, Any]]:
+def _sample_count(duration: float) -> int:
+    """How many stills a clip of this length is measured on."""
+    span = max(duration - 2 * _EDGE_SECONDS, 0.0)
+    return max(SCORE_FRAMES, min(SCORE_FRAMES_MAX, round(span * _SAMPLES_PER_SECOND)))
+
+
+def _sample_frames(src: Path, count: int | None = None) -> list[tuple[float, Any]]:
     """Evenly spaced ``(seconds, image)`` samples; the timestamp locates a clip's worst frame."""
     import io
     import subprocess
@@ -53,10 +68,12 @@ def _sample_frames(src: Path, count: int = SCORE_FRAMES) -> list[tuple[float, An
         return []
     frames: list[tuple[float, Any]] = []
     duration = _duration_seconds(src)
-    if duration is None or duration <= 0:
+    if duration is None or not math.isfinite(duration) or duration <= 0:
         return []
     span = max(duration - 2 * _EDGE_SECONDS, 0.0)
-    # One decode per frame: seeking is cheaper than decoding the whole clip for five stills.
+    if count is None:
+        count = _sample_count(duration)
+    # One decode per frame: seeking is cheaper than decoding the whole clip for a handful of stills.
     for index in range(count):
         offset = _EDGE_SECONDS + (span * (index + 0.5) / count if span else 0.0)
         try:
@@ -126,7 +143,7 @@ def _score_video(
     face_refs: list[list[float]],
     subject_refs: list[list[float]],
     framings: list[float],
-    count: int = SCORE_FRAMES,
+    count: int | None = None,
 ) -> dict[str, Any] | None:
     """A clip's identity as a distribution: the median, plus the worst frame and when it happened.
 
@@ -432,7 +449,7 @@ class Characters:
             return None
 
     def score_cast(
-        self, image_path: Path | str, names: list[str], frames: int = SCORE_FRAMES
+        self, image_path: Path | str, names: list[str], frames: int | None = None
     ) -> dict[str, Any] | None:
         """Each cast member's face score, faces matched one-to-one, swaps flagged. Never raises."""
         try:

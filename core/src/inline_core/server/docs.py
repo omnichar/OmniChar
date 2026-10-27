@@ -246,12 +246,14 @@ def openapi_tags(rpc: RpcRouter) -> list[dict[str, Any]]:
         "restart.\n\n`GET /v1/runs` lists what is still in flight, each with its `queuePosition`, "
         "and `DELETE` cancels one. A project's own run history, kept after a run finishes, lives "
         "over `/rpc` in the `activity` channels.\n\n" + _RUNS_WEBSOCKET,
-        "Takes": "A take is one output file, and these two routes read it: `GET /v1/takes/{id}` "
+        "Takes": "A take is one output file. `GET /v1/takes/{id}` reads it: "
         "for what it is (image or video, its size, its hash, the params it was made with) and "
         "`/bytes` for the file itself. You get a take id back from a run, on `node_done` and in "
         "the run\'s final state.\n\nTakes are never overwritten, so a take id fetched once is "
         "good forever. Grouping takes into a project, and picking which one wins, happens over "
-        "`/rpc` in the `frames` channels.",
+        "`/rpc` in the `frames` channels.\n\nScoring answers how closely a take matched the "
+        "character it was made with. `POST /v1/takes/{id}/score` scores one of this engine's own "
+        "takes; `POST /v1/score` takes the bytes instead, for media rendered elsewhere.",
         "Assets": "Getting bytes in. `/v1/assets` is content-addressed engine input; the "
         "`/upload*` routes land in the open project's library. Raw body, not multipart.\n\n"
         "The `/upload*` routes exist only when a project backend is wired. Listing, renaming and "

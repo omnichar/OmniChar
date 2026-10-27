@@ -10,9 +10,10 @@ import mimetypes
 import os
 import re
 import tempfile
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from os.path import basename
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, cast
 from urllib.parse import unquote
 
@@ -118,6 +119,46 @@ def _within(root: Path, path: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# An allowlist, because scoring reads video from the suffix alone. A guessed suffix gave a video
+# `.bin` and the image path then answered "not measured", which reads as a miss.
+_SCORE_SUFFIX = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+}
+
+# One take. Bounded because the route runs the encoders and needs no credential to reach.
+_SCORE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _cast_names(listed: Sequence[object]) -> list[str]:
+    """Bare file names only: `library.resolve` joins one onto the characters dir unexamined."""
+    # Objects, not strings: one caller passes a list straight off a JSON body.
+    cast = [name.strip() for name in listed if isinstance(name, str) and name.strip()]
+    if any(
+        "/" in name or "\\" in name or name.startswith(".") or PureWindowsPath(name).drive
+        for name in cast
+    ):
+        raise ValueError("A character is named by file name only.")
+    return cast
+
+
+def _score_file(path: Path, cast: list[str]) -> dict[str, Any]:
+    """Identity match for one file. Never raises: both scorers answer None on their own failures."""
+    from ..characters import continuity
+    from ..studio.characters import Characters
+
+    scorer = Characters(store=None, events=None)
+    return (
+        continuity.from_cast(cast, scorer.score_cast(path, cast))
+        if len(cast) > 1
+        else continuity.from_take(cast[0], scorer.score_take(path, cast[0]))
+    )
 
 
 def _error(code: str, message: str, status: int, node_id: str | None = None) -> JSONResponse:
@@ -465,31 +506,69 @@ def create_app(
         listed = body.get("characters")
         if not isinstance(listed, list):
             return _error("invalid_request", "'characters' must be a list of names.", 422)
-        cast = [n.strip() for n in listed if isinstance(n, str) and n.strip()]
+        try:
+            cast = _cast_names(listed)
+        except ValueError as refused:
+            return _error("invalid_request", str(refused), 422)
         if not cast:
             return _error("unprocessable", "No character to score against.", 422)
-        # `library.resolve` joins a name onto the characters dir unchanged, so a name carrying a
-        # path is refused here rather than rewritten into one that happens to resolve.
-        if any("/" in name or "\\" in name or name.startswith(".") for name in cast):
-            return _error("invalid_request", "A character is named by file name only.", 422)
         take = manager.find_take(take_id)
         if take is None:
             return _error("not_found", f"No take {take_id!r}.", 404)
         path = Path(take.uri)
         if not _within(takes_root, path) or not path.is_file():
             return _error("not_found", "Take bytes are not available.", 404)
-        # Scoring is metadata about a render that already happened, so it never raises: both
-        # score_take and score_cast swallow their own failures and answer None.
-        from ..characters import continuity
-        from ..studio.characters import Characters
+        return JSONResponse(_score_file(path, cast))
 
-        scorer = Characters(store=None, events=None)
-        scored = (
-            continuity.from_cast(cast, scorer.score_cast(path, cast))
-            if len(cast) > 1
-            else continuity.from_take(cast[0], scorer.score_take(path, cast[0]))
-        )
-        return JSONResponse(scored)
+    @app.post(
+        "/v1/score",
+        tags=["Takes"],
+        summary="Score media continuity",
+        response_model=ContinuityOut,
+        openapi_extra={
+            "requestBody": binary_body(),
+            "parameters": [
+                {
+                    "in": "query",
+                    "name": "characters",
+                    "required": True,
+                    "schema": {"type": "array", "items": {"type": "string"}},
+                    "description": "Each character file name. More than one scores it as a cast.",
+                }
+            ],
+        },
+    )
+    async def score_media(request: Request) -> Response:
+        """Identity match for bytes this engine did not render, so has no take id for."""
+        # Bytes and not a path, because a path here would read any file wherever `--listen` is on.
+        try:
+            cast = _cast_names(request.query_params.getlist("characters"))
+        except ValueError as refused:
+            return _error("invalid_request", str(refused), 422)
+        if not cast:
+            return _error("unprocessable", "No character to score against.", 422)
+        declared = request.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > _SCORE_MAX_BYTES:
+            return _error("unprocessable", "That is larger than this route scores.", 413)
+        # Capped as it arrives as well: a declared length is only the caller's word for it.
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > _SCORE_MAX_BYTES:
+                return _error("unprocessable", "That is larger than this route scores.", 413)
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not data:
+            return _error("invalid_request", "No bytes to score.", 422)
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip()
+        suffix = _SCORE_SUFFIX.get(content_type)
+        if suffix is None:
+            return _error("invalid_request", f"Nothing is scored for {content_type!r}.", 422)
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = Path(tmp) / f"take{suffix}"
+            staged.write_bytes(data)
+            return JSONResponse(_score_file(staged, cast))
 
     @app.websocket("/v1/runs/{run_id}/events")
     async def run_events(websocket: WebSocket, run_id: str) -> None:

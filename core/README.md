@@ -227,6 +227,8 @@ covering `/v1`, the Studio `/rpc` channels and both websocket streams. The summa
 - `DELETE /v1/runs/{id}` cancels
 - `GET /v1/models` returns node descriptors + `registryVersion` (ETag-aware)
 - `GET /v1/takes/{id}` and `/v1/takes/{id}/bytes`
+- `POST /v1/takes/{id}/score` scores one of this engine's takes against the character it was made
+  with, and `POST /v1/score` does the same for media it did not render, from the bytes themselves
 - `POST /v1/assets` (content-addressed upload) and `GET /v1/health`
 
 ## Development

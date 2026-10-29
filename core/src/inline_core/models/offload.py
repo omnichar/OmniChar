@@ -58,6 +58,8 @@ class OffloadRecipe:
     #: were quantised there.
     keep_precision: tuple[str, ...] = ()
     denoiser_offload: str | None = None
+    #: Already quantised on disk, unlike ``quantize``, which says what this load will do.
+    prequantized: bool = False
     #: Streamed offload needs pinnable weights, which is why the int8 path asks for version 2
     #: tensors; without them this has to be False or the copies serialise against compute.
     use_stream: bool = False
@@ -69,6 +71,11 @@ class OffloadRecipe:
     def quantizes(self) -> bool:
         return self.quantize is not Quantization.NONE
 
+    @property
+    def reduced(self) -> bool:
+        """Reduced either way, so budgeting a prequantized file as full precision refuses it."""
+        return self.quantizes or self.prequantized
+
 
 def recipe_for(
     policy: DevicePolicy,
@@ -76,6 +83,7 @@ def recipe_for(
     keep_precision: tuple[str, ...] = (),
     stream_denoiser: bool = False,
     quantize: bool = True,
+    prequantized: bool = False,
 ) -> OffloadRecipe:
     """The recipe for whatever plan the policy landed on for the current footprint.
 
@@ -91,7 +99,7 @@ def recipe_for(
         return OffloadRecipe(plan=plan, notes=("model does not fit this machine",))
     if plan == "resident":
         return OffloadRecipe(plan=plan, notes=("weights stay on the accelerator",))
-    if not quantize:
+    if not quantize and not prequantized:
         # Full precision, streamed rather than quantised. The fit ladder never picks this - it needs
         # host RAM for the whole unquantised model - but a caller with that RAM gets numbers with no
         # rounding in them, which is what a numerics gate has to compare against.
@@ -102,34 +110,40 @@ def recipe_for(
             vae_offload=LEAF_LEVEL,
             notes=("full-precision weights, denoiser blocks streamed from host RAM",),
         )
+    # A prequantized source takes the same placement as the int8 path and applies no config of its
+    # own, because the bytes already are what that path would have produced.
+    quant = Quantization.NONE if prequantized else Quantization.INT8
+    stored = "int8 weights as stored" if prequantized else "int8 weights"
     if plan == "int8":
         # int8 means **resident** by default, per the ladder in core/CLAUDE.md: quantisation is what
         # buys the fit. A caller whose conditioner must sit beside it says so, and then the denoiser
         # streams instead, trading step time for the VRAM the conditioner needs.
         return OffloadRecipe(
             plan=plan,
-            quantize=Quantization.INT8,
+            quantize=quant,
+            prequantized=prequantized,
             keep_precision=keep_precision,
             denoiser_offload=BLOCK_LEVEL if stream_denoiser else None,
-            use_stream=stream_denoiser,
+            use_stream=stream_denoiser and not prequantized,
             vae_offload=LEAF_LEVEL,
             notes=(
-                "int8 weights, denoiser blocks streamed from host RAM"
+                f"{stored}, denoiser blocks streamed from host RAM"
                 if stream_denoiser
-                else "int8 weights resident on the accelerator",
+                else f"{stored} resident on the accelerator",
             ),
         )
     # "offload": too tight even for streamed int8 blocks, so the VAE joins them and granularity
     # drops to leaf level. Slower per step, but it is the difference between running and not.
     return OffloadRecipe(
         plan=plan,
-        quantize=Quantization.INT8,
+        quantize=quant,
+        prequantized=prequantized,
         keep_precision=keep_precision,
         denoiser_offload=LEAF_LEVEL,
         use_stream=False,
         encoder_offload=LEAF_LEVEL,
         vae_offload=LEAF_LEVEL,
-        notes=("int8 weights, everything streamed leaf-by-leaf", "expect a slow render"),
+        notes=(f"{stored}, everything streamed leaf-by-leaf", "expect a slow render"),
     )
 
 

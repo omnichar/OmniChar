@@ -20,6 +20,7 @@ from typing import Any, cast
 
 import torch
 
+from ..device.memory import IGNORE_LIMITS_ENV, ignore_memory_limits
 from ..device.policy import DevicePolicy, FitEstimate, OffloadMode, Placement, Profile
 from ..device.types import DeviceKind, DType
 from ..errors import CancelledError, ComponentError
@@ -614,9 +615,23 @@ def oom_message(
 
 def wont_fit_message(fit: FitEstimate) -> str:
     have = f" (you have {fit.total_vram_gb:.0f}GB)" if fit.total_vram_gb else ""
+    # Ordered by what each buys: canvas is superlinear, so it beats every other lever here.
     return (
         f"{fit.note} It needs about {fit.required_vram_gb:.0f}GB of GPU memory{have}. "
-        "Use a smaller model or lower the resolution."
+        "Lower the canvas, shorten the clip, pick a smaller or int8 build of the model, "
+        f"or set {IGNORE_LIMITS_ENV}=1 to try anyway."
+    )
+
+
+def refuse_unless_forced(fit: FitEstimate | None) -> None:
+    """One gate for every model's VRAM pre-flight, so the override is not per-runner guesswork."""
+    if fit is None or fit.fits:
+        return
+    if not ignore_memory_limits():
+        raise ComponentError(wont_fit_message(fit))
+    logger.warning(
+        "%s needs ~%.0fGB of VRAM and this card has %.0fGB; %s is set, loading anyway.",
+        fit.plan, fit.required_vram_gb, fit.total_vram_gb or 0.0, IGNORE_LIMITS_ENV,
     )
 
 
@@ -760,6 +775,7 @@ __all__ = [
     "text_encoder_detached",
     "torch_dtype",
     "try_call",
+    "refuse_unless_forced",
     "wont_fit_message",
 ]
 

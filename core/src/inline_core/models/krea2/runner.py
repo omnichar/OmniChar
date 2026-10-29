@@ -205,9 +205,7 @@ class Krea2Runner(NodeRunner):
         self._policy.set_footprint(
             ModelFootprint(**reqs.footprint_bytes(source, vae_file, te_file, control_file))
         )
-        fit = self._policy.fit_estimate()
-        if fit is not None and not fit.fits:
-            raise ComponentError(rt.wont_fit_message(fit))
+        rt.refuse_unless_forced(self._policy.fit_estimate())
 
         logger.info(
             "%s run: %dx%d, %d steps, guidance=%.1f, img2img=%s | %s",

@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 
+from ...device.memory import IGNORE_LIMITS_ENV, ignore_memory_limits
 from ...device.policy import DevicePolicy
 from ...errors import ComponentError
 from .. import loaders
@@ -146,11 +147,14 @@ def load_pipeline(
         video_vae=video_vae_path,
     )
     policy.set_footprint(
-        ModelFootprint(diffusion_bytes=sizes["diffusion_bytes"], vae_bytes=sizes["vae_bytes"])
+        ModelFootprint(
+            diffusion_bytes=sizes["diffusion_bytes"],
+            vae_bytes=sizes["vae_bytes"],
+            prequantized=prequantized,
+        )
     )
     fit = policy.fit_estimate()
-    if fit is not None and not fit.fits:
-        raise ComponentError(rt.wont_fit_message(fit))
+    rt.refuse_unless_forced(fit)
 
     key = rt.PipelineKey(
         arch="minimax-h3",
@@ -178,13 +182,14 @@ def load_pipeline(
         # After the hit and the eviction: checked before them, the cached pipeline being replaced
         # (or reused outright) counted against free RAM, and a second render refused to start.
         _trim_heap()
-        _check_host_ram(policy, sizes, fit, quantize=quantize)
+        _check_host_ram(policy, sizes, fit, quantize=quantize, prequantized=prequantized)
         pipe = _build(
             policy,
             partition=partition,
             factorise_adaln=factorise_adaln,
             adaln_rank=adaln_rank,
             quantize=quantize,
+            prequantized=prequantized,
             staged=staged,
             transformer_path=transformer_path,
             encoder_dir=encoder_dir,
@@ -200,18 +205,25 @@ def load_pipeline(
 #: Room left for the process itself, CUDA context, activations and page cache.
 _RAM_HEADROOM_GB = 6.0
 
+#: Demanded with nothing to reclaim: 6 GB reset a box outright. See docs/minimax-h3.md.
+_NO_SWAP_HEADROOM_GB = 12.0
+
 
 def _check_host_ram(
-    policy: DevicePolicy, sizes: dict[str, int], fit: Any, *, quantize: bool = True
+    policy: DevicePolicy,
+    sizes: dict[str, int],
+    fit: Any,
+    *,
+    quantize: bool = True,
+    prequantized: bool = False,
 ) -> None:
     """Refuse a load that would be killed by the kernel rather than being killed by it.
 
     ``core/CLAUDE.md`` requires this: a host-RAM OOM does not raise, it takes the whole server down
     with it, so the check has to happen before the first byte is read.
 
-    A quantised plan shrinks each transformer block as it lands, so the peak is the int8 total plus
-    the one block being converted, not the 66 GB the file weighs. An unquantised plan really does
-    need the whole thing.
+    A plan that quantises shrinks each block as it lands, one that arrives int8 is already its
+    resident size, and only a genuinely unquantised plan needs the whole file at once.
     """
     free_mb = policy.free_ram_mb()
     if not free_mb:
@@ -220,20 +232,45 @@ def _check_host_ram(
     resident = sizes["diffusion_bytes"] / 1e9
     if quantize and fit is not None and fit.plan in ("int8", "offload"):
         resident *= 0.55  # int8 weights plus the high-precision layers the exclusion list keeps
-    if not quantize:
+    # `resident_bytes` already counted an int8 header, so 0.55 would discount it a second time.
+    if not quantize and not prequantized:
         # The split-residency planner in `_build` puts whatever will not fit RAM on the card, so the
         # unquantised path is checked against RAM plus VRAM. It still refuses, in `_build`, if the
         # card has no room for the overflow.
         card = (fit.total_vram_gb or 0.0) if fit is not None else 0.0
         resident -= min(resident, max(0.0, card - _VRAM_RESERVE_GB))
-    needed = resident + _RAM_HEADROOM_GB
-    if free_gb < needed:
-        raise ComponentError(
-            f"MiniMax H3 needs about {needed:.0f} GB of free system RAM to load, and only "
-            f"{free_gb:.0f} GB is free. The transformer is read into RAM in full before it is "
-            "quantised, so this is the peak even though the resident size is smaller. Close other "
-            "applications, or use a machine with more RAM."
+    # Two tests: the weights must be physically resident, but a pagefile may carry the headroom.
+    swap_gb = (policy.free_swap_mb() or 0) / 1024
+    pageable = swap_gb > 0
+    needed = resident + (_RAM_HEADROOM_GB if pageable else _NO_SWAP_HEADROOM_GB)
+    if free_gb >= resident and free_gb + swap_gb >= needed:
+        return
+    if ignore_memory_limits():
+        logger.warning(
+            "MiniMax H3 wants ~%.0f GB of RAM and %.0f GB is free; %s is set, loading anyway.",
+            needed,
+            free_gb,
+            IGNORE_LIMITS_ENV,
         )
+        return
+    # Said plainly, because it is the difference between a refusal and a machine that resets.
+    no_swap = (
+        " This machine has no swap or pagefile, so there is nothing to reclaim if the load "
+        "overruns and the kernel would kill the process or reset the box."
+        if not pageable
+        else ""
+    )
+    why = (
+        "The weights stream in as they are read, so this is the resident total."
+        if prequantized
+        else "The transformer is read into RAM in full before it is quantised, so this is "
+        "the peak even though the resident size is smaller."
+    )
+    raise ComponentError(
+        f"MiniMax H3 needs about {needed:.0f} GB of free system RAM to load, and only "
+        f"{free_gb:.0f} GB is free.{no_swap} {why} Close other applications, raise your "
+        f"pagefile or swap space, or set {IGNORE_LIMITS_ENV}=1 to try anyway."
+    )
 
 
 def _wired(ref: Any) -> Path | None:
@@ -257,6 +294,7 @@ def _build(
     factorise_adaln: bool = False,
     adaln_rank: int | None = None,
     quantize: bool = True,
+    prequantized: bool = False,
     staged: bool = False,
     transformer_path: Path,
     encoder_dir: Path,
@@ -286,7 +324,11 @@ def _build(
     # `stream_denoiser` asks one question: is the conditioner co-resident during the denoise?
     # Staged, it is not, so the denoiser keeps the card instead of crossing the bus every step.
     recipe = recipe_for(
-        policy, keep_precision=keep, stream_denoiser=not staged, quantize=quantize
+        policy,
+        keep_precision=keep,
+        stream_denoiser=not staged,
+        quantize=quantize,
+        prequantized=prequantized,
     )
     # Streaming pins the offloaded weights in host RAM, and pinning 39 GB beside a 21 GB
     # conditioner staging area does not fit a 64 GB machine. Give up the overlap, keep the fit.
@@ -410,7 +452,7 @@ def _build(
         denoiser=transformer,
         # Skipped only when `from_pretrained` already put it on the card. Left on the CPU because
         # it did not fit, it needs the hooks like anything else.
-        encoder=None if _encoder_on_card else getattr(text_encoder, "model", text_encoder),
+        encoder=None if _encoder_on_card else _streamable_encoder(text_encoder, placement.device),
         vae=getattr(pipe, "vae", None),
         device=placement.device,
     )
@@ -420,6 +462,10 @@ def _build(
     # Whether the phase swap may hand the denoiser the whole card. False on the offload plan, where
     # it carries streaming hooks and is far larger than the card: moving it wholesale is an OOM.
     pipe._inline_resident_denoiser = recipe.denoiser_offload is None  # noqa: SLF001
+    # Same rule for the conditioner: the larger of the two, and the one a 16 GB card streams.
+    pipe._inline_resident_encoder = (  # noqa: SLF001
+        _encoder_on_card or recipe.encoder_offload is None
+    )
     if staged:
         # Split once at build time: the parts share every component, so only the block graph costs.
         owners, parts = _staged_phases(blocks)
@@ -429,7 +475,10 @@ def _build(
         pipe._inline_phase_owners = owners  # noqa: SLF001
         for part in pipe._inline_phases:  # noqa: SLF001
             part.update_components(**dict(pipe.components))
-        transformer.to("cpu")  # the conditioner has the card until the prompt is encoded
+        # Only when it is actually on the card: a group-offloaded module already holds its weights
+        # in host RAM, and diffusers refuses the move with a warning that reads like a fault.
+        if not recipe.denoiser_offload:
+            transformer.to("cpu")  # the conditioner has the card until the prompt is encoded
         if vae_resident:
             # `render_staged` places it for the two phases that read it, not for the whole run.
             pipe.vae.to("cpu")
@@ -494,8 +543,10 @@ def render_staged(pipe: Any, device: Any, cancel_check: Any = None, **call: Any)
     owners: tuple[str, ...] = pipe._inline_phase_owners  # noqa: SLF001
 
     # Parked, never released: the next render needs them, and the bus costs seconds against minutes.
-    movable: dict[str, Any] = {"encoder": pipe.text_encoder}
+    movable: dict[str, Any] = {}
     # Absent on the offload plan: it carries streaming hooks, so moving it wholesale is an OOM.
+    if getattr(pipe, "_inline_resident_encoder", True):
+        movable["encoder"] = pipe.text_encoder
     if getattr(pipe, "_inline_resident_denoiser", True):
         movable["denoiser"] = getattr(pipe, getattr(pipe, "_inline_denoiser", "transformer"))
     if getattr(pipe, "_inline_staged_vae", False):
@@ -553,6 +604,17 @@ def _reclaim() -> None:
 
     gc.collect()
     rt.free_vram()
+
+
+def _streamable_encoder(text_encoder: Any, device: Any) -> Any:
+    """Stream the language model, keep the tower: leaf hooks never onloaded its `pos_embed`."""
+    inner = getattr(text_encoder, "model", text_encoder)
+    language = getattr(inner, "language_model", None)
+    visual = getattr(inner, "visual", None)
+    if language is None or visual is None:
+        return inner
+    visual.to(str(device))  # the engine Device type, which torch does not accept
+    return language
 
 
 def _encoder_placement(placement: Any) -> dict[str, Any]:
@@ -781,6 +843,10 @@ def _unpack_int8(
     model.get_submodule(name).weight = torch.nn.Parameter(weight.to(dtype), requires_grad=False)
 
 
+#: Slots whose dtype is a compute dtype; everything else is quantisation storage, cast at use.
+_CASTABLE = (torch.float16, torch.bfloat16, torch.float32)
+
+
 def _load_into(model: Any, handle: Any, keys: set[str], *, skip: set[str]) -> set[str]:
     """Copy every tensor in, materialising the meta parameters. Returns what the file lacked."""
     import torch
@@ -798,7 +864,14 @@ def _load_into(model: Any, handle: Any, keys: set[str], *, skip: set[str]) -> se
         parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
         attr = name.rsplit(".", 1)[-1]
         value = handle.get_tensor(source)
-        if isinstance(getattr(parent, attr, None), torch.nn.Parameter):
+        current = getattr(parent, attr, None)
+        # To the slot's own dtype, not the file's: the model was built at this card's compute dtype,
+        # and left uncast the unquantised vision tower stayed bf16 beside an fp16 transformer, where
+        # bf16 attention has no memory-efficient kernel before Ampere and asked for 16 GiB of
+        # scores. Only the real compute dtypes, so packed uint8 and float8 scales survive untouched.
+        if current is not None and current.dtype in _CASTABLE and value.dtype in _CASTABLE:
+            value = value.to(current.dtype)
+        if isinstance(current, torch.nn.Parameter):
             setattr(parent, attr, torch.nn.Parameter(value, requires_grad=False))
         else:
             parent.register_buffer(attr, value, persistent=True)
@@ -846,9 +919,9 @@ def _plan_residency(
 ) -> int:
     """How many leading blocks to place on the card so the rest fits host RAM.
 
-    Zero for a quantised load, which fits RAM with room. The full-precision path is the case this
-    exists for: 66 GB of weights against a 64 GB machine has nowhere to sit, and the difference
-    between placing the overflow and letting the kernel swap it is minutes per step.
+    Zero when the weights are already reduced, which fits RAM with room. The full-precision path
+    is the case this exists for: 66 GB of weights against a 64 GB machine has nowhere to sit, and
+    the difference between placing the overflow and letting the kernel swap it is minutes per step.
 
     ``later_ram_bytes`` is what components loaded *after* the denoiser will claim from the same RAM.
     Free memory read here is not free memory at peak, and the difference is not small: H3's video
@@ -862,7 +935,9 @@ def _plan_residency(
     is unreclaimable a step later. Anything sizing this from ``available`` is reading a number that
     is about to stop being true.
     """
-    if recipe.quantizes or not recipe.denoiser_offload:
+    # `reduced`, not `quantizes`: a prequantized file is already int8 on disk and streams from the
+    # mmap, so there is no overflow to place and no split to plan.
+    if recipe.reduced or not recipe.denoiser_offload:
         return 0
     block_bytes = _block_bytes(source)
     # `free_ram_mb` is GB-times-1024, not mebibytes, which is how `_check_host_ram` reads it too.
@@ -884,10 +959,20 @@ def _plan_residency(
         reserve_bytes=int(_VRAM_RESERVE_GB * 1e9),
     )
     if needed > affordable:
+        if ignore_memory_limits():
+            logger.warning(
+                "MiniMax H3 wants %d resident blocks and %d fit; %s is set, placing %d.",
+                needed,
+                affordable,
+                IGNORE_LIMITS_ENV,
+                affordable,
+            )
+            return affordable
         raise ComponentError(
             f"MiniMax H3 in full precision needs {needed} of its blocks on the accelerator to fit "
-            f"{free_ram / 1e9:.0f} GB of system RAM, and there is room for {affordable}. Run it "
-            "quantised, or use a machine with more RAM."
+            f"{free_ram / 1e9:.0f} GB of system RAM, and there is room for {affordable}. Use the "
+            "int8 build from the model popup, raise your pagefile or swap space, or set "
+            f"{IGNORE_LIMITS_ENV}=1 to try anyway."
         )
     # The projected figure is logged because it is the number that decides whether the machine
     # survives the render, and it is not observable anywhere else until it is too late.

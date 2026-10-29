@@ -190,9 +190,7 @@ class ZImageRunner(NodeRunner):
                 mode, source, vae_file, te_file, str(controlnet_path) if use_control else "",
             )
         )
-        fit = self._policy.fit_estimate()
-        if fit is not None and not fit.fits:
-            raise ComponentError(rt.wont_fit_message(fit))
+        rt.refuse_unless_forced(self._policy.fit_estimate())
 
         logger.info(
             "Z-Image run: %dx%d, %d steps, guidance=%.1f, img2img=%s | %s",

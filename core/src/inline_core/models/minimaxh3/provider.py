@@ -76,12 +76,18 @@ class MiniMaxH3Provider:
         sizes = reqs.footprint_bytes(self._partition)
         if not any(sizes.values()):
             return None
+        # Asked the same way the loader asks it. A popup that discounts an int8 build the loader
+        # will not discount promises a fit the render then contradicts, and the provider's own rule
+        # is that a wrong estimate is worse than none.
+        chosen = reqs.resolve_transformer(self._partition)
+        prequantized = chosen is not None and reqs.inspect_file(chosen).quantisation == "int8"
         staged = ModelFootprint(
             diffusion_bytes=sizes["diffusion_bytes"],
             # Staged loading means the encoder is not resident while the denoiser runs, so it does
             # not belong in the peak the fit ladder sizes against.
             text_encoder_bytes=0,
             vae_bytes=sizes["vae_bytes"],
+            prequantized=prequantized,
         )
         fit = policy.estimate_fit(staged)
         if fit is None:

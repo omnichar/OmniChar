@@ -76,6 +76,40 @@ def test_the_tightest_plan_drops_to_leaf_level_and_takes_the_vae_with_it() -> No
     assert any("slow" in note for note in recipe.notes)
 
 
+def test_a_prequantized_source_takes_the_int8_placement_and_applies_nothing() -> None:
+    """A ComfyUI int8 build is already what the int8 path would have produced.
+
+    Routing it down the full-precision recipe instead left its conditioner with no offload hooks at
+    all, which is a 16.5 GB wholesale `.to(device)` onto whatever card the caller has.
+    """
+    recipe = recipe_for(
+        _Policy("offload"), keep_precision=H3_KEEP, quantize=False, prequantized=True
+    )
+    assert recipe.quantize is Quantization.NONE  # nothing to apply; the bytes are already int8
+    assert recipe.prequantized and recipe.reduced
+    assert recipe.encoder_offload == LEAF_LEVEL  # the bug: this was None
+    assert recipe.denoiser_offload == LEAF_LEVEL and recipe.vae_offload == LEAF_LEVEL
+    assert any("as stored" in note for note in recipe.notes)
+
+
+def test_reduced_separates_already_small_from_about_to_be_quantised() -> None:
+    """Three memory decisions read `quantizes` as "is this model small", and a prequantized file
+    answers no to it while being exactly that."""
+    pre = recipe_for(_Policy("int8"), quantize=False, prequantized=True)
+    assert not pre.quantizes and pre.reduced
+    full = recipe_for(_Policy("int8"), quantize=False)
+    assert not full.quantizes and not full.reduced
+    quant = recipe_for(_Policy("int8"))
+    assert quant.quantizes and quant.reduced
+
+
+def test_a_prequantized_source_never_asks_for_a_pinned_stream() -> None:
+    """Streamed offload wants torchao version 2 tensors to pin. A ComfyUI int8 file is not one, so
+    asking for the overlap would serialise the copies against compute instead of hiding them."""
+    recipe = recipe_for(_Policy("int8"), stream_denoiser=True, quantize=False, prequantized=True)
+    assert recipe.denoiser_offload == BLOCK_LEVEL and not recipe.use_stream
+
+
 def test_wont_fit_is_carried_through_rather_than_turned_into_a_recipe() -> None:
     recipe = recipe_for(_Policy("wont-fit"))
     assert recipe.plan == "wont-fit" and not recipe.quantizes
@@ -231,3 +265,208 @@ def test_prune_clears_everything_it_is_not_told_to_keep(models_root: Path) -> No
     assert prune(keep={keep}) == 1
     assert lookup(_key(source, adaln=False)) == keep
     assert lookup(_key(source, adaln=True)) is None
+
+
+# --- the host-RAM guard ---------------------------------------------------------------------------
+
+
+class _RamPolicy:
+    """A policy that only answers the two memory readers the guard consults."""
+
+    def __init__(self, free_gb: float, swap_gb: float = 0.0) -> None:
+        self._free = free_gb
+        self._swap = swap_gb
+
+    def free_ram_mb(self) -> int:
+        return int(self._free * 1024)
+
+    def free_swap_mb(self) -> int:
+        return int(self._swap * 1024)
+
+
+def _h3_fit(plan: str, vram_gb: float) -> Any:
+    return FitEstimate(
+        plan=plan,
+        quant=Quantization.NONE,
+        offload_mode=OffloadMode.NONE,
+        profile=Profile.LOWVRAM,
+        required_vram_gb=24.4,
+        total_vram_gb=vram_gb,
+        fits=True,
+        note="",
+    )
+
+
+#: ComfyUI's 21 GB int8 build, the file the 5080 report was running.
+_INT8_SIZES = {"diffusion_bytes": 20_970_379_616, "vae_bytes": 3_421_000_000}
+
+
+def test_a_prequantized_load_is_not_budgeted_as_full_precision(monkeypatch: Any) -> None:
+    """The 5080 report: 21 GB of int8 on a 32 GB machine was refused for RAM.
+
+    Treated as full precision it was charged the whole file minus a VRAM credit, which on a 16 GB
+    card is almost nothing, so it demanded ~20 GB of free physical RAM.
+    """
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    policy = _RamPolicy(free_gb=22.0, swap_gb=16.0)
+    # Prequantized: the weights are resident at their own size and the pagefile covers the rest.
+    pl._check_host_ram(policy, _INT8_SIZES, _h3_fit("offload", 17.1), quantize=False,
+                       prequantized=True)
+
+
+def test_no_swap_demands_real_headroom_rather_than_a_reclaimable_margin() -> None:
+    """With nothing to page out, 6GB of headroom is not headroom.
+
+    A split sized with exactly that peaked at 1.9GB free once the first denoising step converted
+    the page cache out from under it, and the kernel reset the machine with no OOM message. The
+    refusal says so, because the alternative is a box that reboots mid-render.
+    """
+    from inline_core.errors import ComponentError
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    fit = _h3_fit("offload", 16.0)
+    # 30GB free carries 21GB of weights plus 6GB, and is refused anyway with no swap behind it.
+    with pytest.raises(ComponentError) as caught:
+        pl._check_host_ram(_RamPolicy(free_gb=30.0, swap_gb=0.0), _INT8_SIZES, fit,
+                           quantize=False, prequantized=True)
+    assert "no swap or pagefile" in str(caught.value)
+    # The same machine with a pagefile loads, which is the reported 32GB Windows box.
+    pl._check_host_ram(_RamPolicy(free_gb=24.0, swap_gb=64.0), _INT8_SIZES, fit,
+                       quantize=False, prequantized=True)
+
+
+def test_the_weights_themselves_must_be_physically_resident(monkeypatch: Any) -> None:
+    """A pagefile carries the process, never the weights: they are read every step, and a model
+    sized against swap thrashes instead of running. docs/minimax-h3.md has the measurement."""
+    from inline_core.errors import ComponentError
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    policy = _RamPolicy(free_gb=8.0, swap_gb=128.0)
+    with pytest.raises(ComponentError) as caught:
+        pl._check_host_ram(policy, _INT8_SIZES, _h3_fit("offload", 17.1), quantize=False,
+                           prequantized=True)
+    assert "pagefile" in str(caught.value)
+
+
+def test_the_refusal_never_tells_a_quantised_file_to_be_quantised() -> None:
+    """"Run it quantised" was the advice a user running the quantised build got."""
+    from inline_core.errors import ComponentError
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    policy = _RamPolicy(free_gb=4.0)
+    with pytest.raises(ComponentError) as caught:
+        pl._check_host_ram(policy, _INT8_SIZES, _h3_fit("offload", 17.1), quantize=False,
+                           prequantized=True)
+    assert "quantised" not in str(caught.value)
+    assert "stream in as they are read" in str(caught.value)
+
+
+def test_the_override_turns_the_refusal_into_a_warning(monkeypatch: Any) -> None:
+    """Named in the message, because "use a machine with more RAM" is not an answer to someone
+    whose other tools run the same file on the same box."""
+    from inline_core.device.memory import IGNORE_LIMITS_ENV
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    monkeypatch.setenv(IGNORE_LIMITS_ENV, "1")
+    pl._check_host_ram(_RamPolicy(free_gb=2.0), _INT8_SIZES, _h3_fit("offload", 17.1),
+                       quantize=False, prequantized=True)
+
+
+class _Movable:
+    """Records every `.to()`, which is the whole point: a wholesale move is the bug."""
+
+    def __init__(self) -> None:
+        self.moves: list[str] = []
+
+    def to(self, device: Any) -> _Movable:
+        self.moves.append(str(device))
+        return self
+
+
+class _StagedPipe:
+    def __init__(self, *, resident_encoder: bool) -> None:
+        self.text_encoder = _Movable()
+        self.transformer = _Movable()
+        self.vae = _Movable()
+        self.components: dict[str, Any] = {}
+        self._inline_phases = (lambda **_: "encoded", lambda state, **_: f"{state}+denoised")
+        self._inline_phase_owners = ("encoder", "denoiser")
+        self._inline_denoiser = "transformer"
+        self._inline_resident_denoiser = True
+        self._inline_staged_vae = False
+        self._inline_resident_encoder = resident_encoder
+
+
+def test_a_streamed_conditioner_is_never_moved_onto_the_card_wholesale() -> None:
+    """The render that found this OOM'd at 14.53 of 14.56 GiB inside `text_encoder.to(device)`.
+
+    The hooks sit on `text_encoder.model`, so moving the outer module walks into a group-offloaded
+    one and onloads the whole 20 GB conditioner. The denoiser was already guarded; the encoder was
+    not, and giving it an `encoder_offload` on a small card is what made the gap reachable.
+    """
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    pipe = _StagedPipe(resident_encoder=False)
+    assert pl.render_staged(pipe, "cuda:0") == "encoded+denoised"
+    assert pipe.text_encoder.moves == []
+
+
+def test_a_resident_conditioner_still_takes_the_card_for_its_phase() -> None:
+    """The guard must not cost the staged plan its swap, which keeps the bus off the steps."""
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    pipe = _StagedPipe(resident_encoder=True)
+    assert pl.render_staged(pipe, "cuda:0") == "encoded+denoised"
+    assert "cuda:0" in pipe.text_encoder.moves
+
+
+class _Tower:
+    def __init__(self) -> None:
+        self.placed: list[str] = []
+
+    def to(self, device: Any) -> _Tower:
+        # Mirrors torch: a non-string, non-torch.device argument is a TypeError, which is the bug.
+        if not isinstance(device, str):
+            raise TypeError(f"to() received an invalid combination of arguments - got {device!r}")
+        self.placed.append(device)
+        return self
+
+
+class _Conditioner:
+    def __init__(self) -> None:
+        self.model = type(
+            "_Inner", (), {"language_model": object(), "visual": _Tower()}
+        )()
+
+
+def test_the_vision_tower_is_placed_with_a_string_and_the_language_model_is_streamed() -> None:
+    """The tower is placed because leaf hooks never onloaded its `pos_embed`.
+
+    The string matters: `placement.device` is the engine's own `Device`, which torch rejects, and
+    the failure landed six minutes into a load rather than at import.
+    """
+    from inline_core.device.types import Device, DeviceKind
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    pipe = _Conditioner()
+    streamed = pl._streamable_encoder(pipe, Device(DeviceKind.CUDA, 0))
+
+    assert streamed is pipe.model.language_model, "the 20 GB half is what should carry hooks"
+    assert pipe.model.visual.placed == ["cuda:0"]
+
+
+def test_a_prequantized_recipe_plans_no_split(tmp_path: Path) -> None:
+    """Spec'd, and otherwise silent: `quantizes` is False for a prequantized file, so reading that
+    instead of `reduced` sent an int8 build down the 66 GB full-precision split planner."""
+    from inline_core.models.minimaxh3 import pipeline as pl
+
+    source = tmp_path / "h3-int8.safetensors"
+    source.write_bytes(b"0" * 1024)
+    recipe = recipe_for(
+        _Policy("offload"), keep_precision=H3_KEEP, stream_denoiser=True,
+        quantize=False, prequantized=True,
+    )
+
+    assert recipe.reduced and not recipe.quantizes, "the flag the planner used to miss"
+    assert pl._plan_residency(recipe, _RamPolicy(free_gb=8.0), source, "cuda:0") == 0

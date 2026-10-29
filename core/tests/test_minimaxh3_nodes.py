@@ -315,6 +315,43 @@ def test_an_int8_convrot_build_is_offered(models_root: Path) -> None:
     assert candidate.reason == ""
 
 
+def test_the_popup_estimate_sizes_an_int8_build_the_way_the_loader_will(models_root: Path) -> None:
+    """The popup and the loader must not disagree about the same file.
+
+    The estimate builds its own footprint, so it used to discount an int8 build that the loader does
+    not, promising "int8 resident, fits" for a plan that actually streams. A warning the render then
+    contradicts is worse than no warning, which is the provider's own rule.
+    """
+    from inline_core.device.memory import MemoryPolicy
+    from inline_core.device.policy import ModelFootprint
+    from inline_core.device.types import Device, DeviceKind
+    from inline_core.models.minimaxh3.provider import MiniMaxH3Provider
+
+    _fake_checkpoint(
+        models_root / "diffusion_models" / "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        {
+            **_H3_PROBE,
+            "adaln_t_table": [1025, 8],
+            "blocks.0.attn.qkv_proj.comfy_quant": [70],
+        },
+        dtypes={"blocks.0.attn.qkv_proj.weight": "I8"},
+    )
+    # The 5080 from the report: 16 GiB reads as ~17.1 decimal GB, 32 GiB of RAM as ~34.4.
+    policy = MemoryPolicy(Device(DeviceKind.CUDA, 0), vram_gb=17.1, ram_gb=34.4)
+    seen: list[ModelFootprint] = []
+    original = policy.estimate_fit
+
+    def capture(footprint: ModelFootprint) -> object:
+        seen.append(footprint)
+        return original(footprint)
+
+    policy.estimate_fit = capture  # type: ignore[method-assign]
+    assert MiniMaxH3Provider("fl2va").estimate(policy) is not None
+    # The flag, not the verdict: this fixture is a header with no bytes behind it, so every rung
+    # fits and the verdict says nothing. What matters is that the ladder was told not to discount.
+    assert seen and seen[0].prequantized is True
+
+
 def test_int8_without_a_comfy_marker_is_refused(models_root: Path) -> None:
     """Bare int8 carries no recipe to read it by, so it is named unknown and refused."""
     path = _fake_checkpoint(
@@ -537,6 +574,7 @@ class _NullPolicy:
 
     def set_footprint(self, *_a: object) -> None: ...
     def fit_estimate(self) -> None: return None
+    def free_swap_mb(self) -> None: return None
 
 
 def test_generation_asks_for_the_int8_builds_and_training_for_bf16(models_root: Path) -> None:
@@ -845,3 +883,44 @@ def test_a_cached_pipeline_is_reused_even_when_free_ram_looks_short(  # type: ig
         assert again is first and len(built) == 1
     finally:
         rt.PIPELINES.clear()
+
+
+def test_the_packed_encoder_loads_at_the_cards_dtype_not_the_files() -> None:
+    """A bf16 file on a card the policy runs in fp16 left the vision tower bf16 beside an fp16
+    transformer. Before Ampere bf16 attention has no memory-efficient kernel, so one reference
+    asked SDPA for 16 GiB of scores and OOM'd; fp16 at the same shape needs 3.4 GiB. The cast must
+    not touch quantisation storage, where a silently converted float8 scale renders a wrong clip.
+    """
+    import torch
+
+    from inline_core.models.minimaxh3.pipeline import _load_into
+
+    class _Slots(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = torch.nn.Linear(4, 4).to(torch.float16)
+            self.register_buffer("weight", torch.empty(4, 2, dtype=torch.uint8))
+            self.register_buffer("weight_scale", torch.empty(4, dtype=torch.float8_e4m3fn))
+            self.register_buffer("weight_scale_2", torch.empty((), dtype=torch.float32))
+
+    stored = {
+        "lin.weight": torch.zeros(4, 4, dtype=torch.bfloat16),
+        "lin.bias": torch.zeros(4, dtype=torch.bfloat16),
+        "weight": torch.ones(4, 2, dtype=torch.uint8),
+        "weight_scale": torch.ones(4, dtype=torch.float8_e4m3fn),
+        "weight_scale_2": torch.ones((), dtype=torch.float32),
+    }
+
+    class _Handle:
+        def get_tensor(self, key: str) -> torch.Tensor:
+            return stored[key]
+
+    model = _Slots()
+    assert _load_into(model, _Handle(), set(stored), skip=set()) == set()
+
+    got = {n: t.dtype for n, t in [*model.named_parameters(), *model.named_buffers()]}
+    assert got["lin.weight"] is torch.float16, "the file's bf16 must take the slot's dtype"
+    assert got["lin.bias"] is torch.float16
+    assert got["weight"] is torch.uint8, "packed nvfp4 weights are not a compute dtype"
+    assert got["weight_scale"] is torch.float8_e4m3fn, "a cast scale is a silently wrong render"
+    assert got["weight_scale_2"] is torch.float32

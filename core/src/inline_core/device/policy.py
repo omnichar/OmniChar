@@ -89,6 +89,8 @@ class ModelFootprint:
     vae_bytes: int = 0
     #: A ControlNet loaded alongside the denoiser. Never quantized, so it counts full in every plan.
     controlnet_bytes: int = 0
+    #: Already reduced on disk, so no rung may discount them again: int8 bytes are resident bytes.
+    prequantized: bool = False
 
     @property
     def total_bytes(self) -> int:
@@ -168,4 +170,8 @@ class DevicePolicy(ABC):
 
     def free_ram_mb(self) -> int | None:
         """Live free system RAM in MB, or None when unmeasurable. Default None."""
+        return None
+
+    def free_swap_mb(self) -> int | None:
+        """Free swap or pagefile in MB, or None when unmeasurable. Default None."""
         return None

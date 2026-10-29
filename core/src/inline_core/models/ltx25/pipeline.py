@@ -116,17 +116,19 @@ def _plan(policy: DevicePolicy, paths: dict[str, Path], build: str) -> memory.Lt
     sizes = reqs.footprint_bytes(
         build, transformer=paths["transformer"], video_vae=paths["video_vae"]
     )
+    quantisation = reqs.inspect_file(paths["transformer"]).quantisation
+    prequantised = quantisation == "nvfp4"
+    comfy_int8 = quantisation == "int8"
     policy.set_footprint(
         ModelFootprint(
             diffusion_bytes=sizes["diffusion_bytes"],
             text_encoder_bytes=sizes["text_encoder_bytes"],
             vae_bytes=sizes["vae_bytes"],
+            # Both are stored in target form, so the ladder must not discount them again.
+            prequantized=prequantised or comfy_int8,
         )
     )
     fit = policy.fit_estimate()
-    quantisation = reqs.inspect_file(paths["transformer"]).quantisation
-    prequantised = quantisation == "nvfp4"
-    comfy_int8 = quantisation == "int8"
     if prequantised and _capability() < _NVFP4_MIN_CAPABILITY:
         raise ComponentError(
             f"{_LABEL}: this is the NVFP4 build, which needs a Blackwell card and the ltx-kernels "

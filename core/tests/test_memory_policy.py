@@ -281,3 +281,70 @@ def test_budget_and_free_probes_report_mb() -> None:
     # free probes hit torch/psutil lazily; on a CPU host they return None or an int, never raise.
     assert policy.free_vram_mb() is None or isinstance(policy.free_vram_mb(), int)
     assert policy.free_ram_mb() is None or isinstance(policy.free_ram_mb(), int)
+
+
+# The RTX 5080 a user reported with: 16 GiB of VRAM reads as ~17.1 decimal GB through
+# mem_get_info, and 32 GiB of RAM reads as ~34.4. The checkpoint is ComfyUI's 21 GB int8 build
+# plus H3's int8 video VAE, both counted from their headers.
+_H3_INT8_ON_A_5080 = ModelFootprint(
+    diffusion_bytes=20_970_379_616,
+    vae_bytes=3_421_000_000,
+    prequantized=True,
+)
+
+
+def test_a_prequantized_footprint_is_not_discounted_twice() -> None:
+    """Its bytes already are its resident size, so no rung may halve them again.
+
+    Halving an int8 build scored 21 GB as 10.5 and promised it resident in 13.9 GB of a 17.1 GB
+    card. Under-sizing is the dangerous direction, per core/CLAUDE.md: the ladder then hands back a
+    plan the machine cannot run and the load dies to a host-RAM OOM kill instead of raising.
+    """
+    policy = MemoryPolicy(_CUDA, vram_gb=17.1, ram_gb=34.4)
+    policy.set_footprint(_H3_INT8_ON_A_5080)
+    fit = policy.fit_estimate()
+    assert fit is not None
+    assert fit.quant is not Quantization.NF4
+    assert fit.required_vram_gb > 20  # the real 24.4, not a halved 13.9
+    assert fit.plan != "int8"  # "int8 resident" on a 17 GB card was the under-size
+
+
+def test_h3_int8_on_a_16gb_card_streams_rather_than_being_refused() -> None:
+    """The regression test for the 5080 report: this file runs in ComfyUI on this card.
+
+    It does not fit VRAM and never will, so the answer is to stream it, not to refuse it. What the
+    user must not get is `wont-fit`, which is reserved for a model too big for VRAM *and* RAM.
+    """
+    policy = MemoryPolicy(_CUDA, vram_gb=17.1, ram_gb=34.4)
+    policy.set_footprint(_H3_INT8_ON_A_5080)
+    fit = policy.fit_estimate()
+    assert fit is not None
+    assert fit.fits
+    assert fit.plan == "offload"
+    assert fit.offload_mode is OffloadMode.SEQUENTIAL
+
+
+def test_a_prequantized_model_larger_than_ram_still_refuses() -> None:
+    """The refusal is not removed, only corrected. Nothing streams from a machine too small to hold
+    it, which is the case the pre-flight exists for: a kernel kill, not an exception."""
+    policy = MemoryPolicy(_CUDA, vram_gb=17.1, ram_gb=8.0)
+    policy.set_footprint(_H3_INT8_ON_A_5080)
+    fit = policy.fit_estimate()
+    assert fit is not None
+    assert not fit.fits
+    assert fit.plan == "wont-fit"
+
+
+def test_a_prequantized_footprint_never_lands_on_the_int8_rung() -> None:
+    """The rung is unreachable by construction, and a reader cannot see that from the ladder.
+
+    With `prequantized`, int8 is sized at the full figure, so any cap that clears int8 cleared
+    resident first. Swept rather than spot-checked, because the guarantee is what lets the callers
+    pass `Quantization.NONE` without the policy also having to override itself.
+    """
+    gib = 1024**3
+    footprint = ModelFootprint(diffusion_bytes=21 * gib, vae_bytes=1 * gib, prequantized=True)
+    for vram_gb in range(4, 81, 2):
+        policy = MemoryPolicy(devices=[_CUDA], device=_CUDA, vram_gb=float(vram_gb), ram_gb=64.0)
+        fit = policy.estimate_fit(footprint)
+        assert fit is None or fit.quant is not Quantization.INT8, (vram_gb, fit)

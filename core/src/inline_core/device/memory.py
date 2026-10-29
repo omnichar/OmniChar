@@ -119,6 +119,16 @@ def _free_ram_gb() -> float | None:
         return None
 
 
+def _free_swap_gb() -> float | None:
+    """Kept separate from RAM: weights read every step must be resident or the render thrashes."""
+    try:
+        import psutil
+
+        return psutil.swap_memory().free / 1e9
+    except Exception:
+        return None
+
+
 def _env_profile() -> Profile | None:
     value = os.environ.get("INLINE_PROFILE", "").strip().lower()
     return next((p for p in Profile if p.value == value), None)
@@ -134,6 +144,15 @@ def _env_budget() -> float | None:
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+#: Named in every refusal: "use a machine with more RAM" is not an answer to a working ComfyUI.
+IGNORE_LIMITS_ENV = "INLINE_IGNORE_MEMORY_LIMITS"
+
+
+def ignore_memory_limits() -> bool:
+    """Opt-in, because refusing with no override is the difference between slow and no render."""
+    return _env_flag(IGNORE_LIMITS_ENV)
 
 
 def _env_allow_offload() -> bool:
@@ -227,7 +246,8 @@ class MemoryPolicy(DevicePolicy):
         # The VAE and a ControlNet are never quantized, so they cost the same under every plan.
         fixed = (fp.vae_bytes + fp.controlnet_bytes) / 1e9
         full = big + fixed
-        int8 = big * _INT8_FACTOR + fixed
+        # Already at its resident size, so scaling it again scored a 21 GB int8 build as 10.5.
+        int8 = full if fp.prequantized else big * _INT8_FACTOR + fixed
         forced = _env_profile() is not None  # explicit --profile pins the profile; fit picks quant
 
         def prof(auto: Profile) -> Profile:
@@ -244,8 +264,8 @@ class MemoryPolicy(DevicePolicy):
                 int8, budget, True,
                 "Weights are int8-quantized to fit this GPU's VRAM.",
             )
-        nf4 = big * _NF4_FACTOR + fixed
-        if nf4 <= cap:
+        nf4 = full if fp.prequantized else big * _NF4_FACTOR + fixed
+        if nf4 <= cap and not fp.prequantized:
             return FitEstimate(
                 "nf4", Quantization.NF4, OffloadMode.NONE, prof(Profile.LOWVRAM),
                 nf4, budget, True,
@@ -275,6 +295,10 @@ class MemoryPolicy(DevicePolicy):
 
     def free_ram_mb(self) -> int | None:
         gb = _free_ram_gb()
+        return int(gb * 1024) if gb is not None else None
+
+    def free_swap_mb(self) -> int | None:
+        gb = _free_swap_gb()
         return int(gb * 1024) if gb is not None else None
 
     def _choose_profile(self) -> Profile:

@@ -231,19 +231,19 @@ class Flux2Runner(NodeRunner):
         images = [rt.load_image(ref, _LABEL) for ref in refs]
         control_map = rt.load_image(control, _LABEL) if control_file else None
 
-        # Size-aware placement: hand the policy the on-disk sizes so it fits dtype/quant/offload to
-        # THIS GPU, then refuse an impossible load up front rather than OOM-killing the server.
-        self._policy.set_footprint(
-            ModelFootprint(**reqs.footprint_bytes(source, vae_file, te_file))
-        )
-        fit = self._policy.fit_estimate()
-        if fit is not None and not fit.fits:
-            raise ComponentError(rt.wont_fit_message(fit))
-
-        staged = _needs_staged_encode(source, vae_file, te_file, self._policy)
         # A checkpoint that ships already quantized loads as-is: re-quantizing it is a hard error,
         # and its on-disk weights are already the resident ones.
         prequantized = V.is_prequantized(source)
+        # Size-aware placement: hand the policy the on-disk sizes so it fits dtype/quant/offload to
+        # THIS GPU, then refuse an impossible load up front rather than OOM-killing the server.
+        self._policy.set_footprint(
+            ModelFootprint(
+                **reqs.footprint_bytes(source, vae_file, te_file), prequantized=prequantized
+            )
+        )
+        rt.refuse_unless_forced(self._policy.fit_estimate())
+
+        staged = _needs_staged_encode(source, vae_file, te_file, self._policy)
         quant = Quantization.NONE if prequantized else self._policy.quantization()
         logger.info(
             "%s (%s) run: %dx%d, %d steps, guidance=%.1f, %d reference(s) | %s",

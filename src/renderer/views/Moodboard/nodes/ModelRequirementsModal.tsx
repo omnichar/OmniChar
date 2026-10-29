@@ -6,7 +6,7 @@
  */
 import { useModelRequirementsStore } from '../../../store/modelRequirementsStore'
 import { useCoreNodesStore } from '../../../store/coreNodesStore'
-import type { ModelComponent } from '@shared/coreNodes'
+import type { ModelComponent, ModelFitEstimate } from '@shared/coreNodes'
 import { DownloadIcon, XIcon } from './NodeBadge'
 
 function ComponentRow({
@@ -69,6 +69,25 @@ function ComponentRow({
   )
 }
 
+const formatGb = (mb: number | null): string => (mb === null ? '?' : `${Math.round(mb / 1024)}GB`)
+
+// Caller gates this on allPresent: the estimate sizes the files on disk, so a partial set reads as fitting.
+function FitNote({ estimate }: { estimate: ModelFitEstimate }): React.JSX.Element | null {
+  if (!estimate.warning) return null
+  const tone = estimate.fits
+    ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+    : 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+  return (
+    <div className={`flex flex-col gap-1 border-b border-border px-4 py-2.5 text-[11px] ${tone}`}>
+      <span className="font-medium">{estimate.warning}</span>
+      <span className="font-mono text-[10px] opacity-80">
+        needs {formatGb(estimate.requiredVramMb)} &middot; card {formatGb(estimate.totalVramMb)}{' '}
+        &middot; RAM free {formatGb(estimate.freeRamMb)}
+      </span>
+    </div>
+  )
+}
+
 export function ModelRequirementsModal(): React.JSX.Element | null {
   const cacheKey = useModelRequirementsStore((s) => s.openFor)
   const close = useModelRequirementsStore((s) => s.close)
@@ -114,6 +133,8 @@ export function ModelRequirementsModal(): React.JSX.Element | null {
             <XIcon className="h-4 w-4" />
           </button>
         </header>
+
+        {reqs.allPresent && reqs.estimate ? <FitNote estimate={reqs.estimate} /> : null}
 
         <p className="border-b border-border px-4 py-2 text-[11px] leading-relaxed text-zinc-500">
           These files must be on disk to generate. Nothing is downloaded automatically - grab what's

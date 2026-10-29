@@ -14,14 +14,29 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..quiet import quiet_dependency_noise
 from . import protocol
+
+
+def _driver_message(text: str) -> str | None:
+    """A driver-level CUDA failure, named by the setting that most often causes it."""
+    if "CUDA driver error" not in text and "cuMemSetAccess" not in text:
+        return None
+    # cuMemSetAccess is reached only by the expandable-segments allocator, which some Windows
+    # drivers refuse to map at all, so naming the variable is the one actionable thing here.
+    return (
+        "The CUDA driver refused this run. If you are on Windows, set "
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False and try again, then update your GPU "
+        "driver: RTX 50-series needs R580 or newer. Run webui.bat --print-torch-index to see which "
+        f"CUDA build you are on. The driver said: {text}"
+    )
 
 
 def _message_for(error: Exception, manifest: dict[str, Any]) -> str:
     """Turn a CUDA OOM into something the user can act on. Training resolution drives peak VRAM far
     more than rank does, so point at that first - a 16GB card trains Z-Image at 512 but not 768."""
     if type(error).__name__ != "OutOfMemoryError":
-        return str(error)
+        return _driver_message(str(error)) or str(error)
     resolution = int(manifest.get("hyperparams", {}).get("resolution", 0) or 0)
     lower = " Try 512." if resolution > 512 else ""
     at = f" at {resolution}px" if resolution else ""
@@ -48,6 +63,7 @@ def main(argv: list[str]) -> int:
         protocol.error(f"Could not read manifest: {exc}")
         return 2
 
+    quiet_dependency_noise()  # before the heavy import below, which is what pulls diffusers in
     try:
         from .trainer import train  # heavy deps (torch/diffusers/peft) load here, not at import
     except Exception as exc:  # noqa: BLE001 - report a missing training stack cleanly

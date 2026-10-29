@@ -406,3 +406,19 @@ def test_without_the_setting_a_lora_is_still_recorded_under_loras(monkeypatch) -
 
     monkeypatch.delenv("INLINE_TRAINED_LORAS_DIR", raising=False)
     assert config.lora_output_path("run.safetensors") == "loras/run.safetensors"
+
+
+def test_the_training_subprocess_respects_a_callers_alloc_conf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Report 2's fix. A literal after `**os.environ` overrode the user, and `cuMemSetAccess` is
+    reached only by that allocator, so there was no way to turn it off."""
+    from inline_core.studio.training import _subprocess_env
+
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
+    assert _subprocess_env([])["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:False"
+
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    env = _subprocess_env([2, 3])
+    assert env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"

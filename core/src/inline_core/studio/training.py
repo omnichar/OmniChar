@@ -21,7 +21,7 @@ import shutil
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -66,6 +66,18 @@ def _unique_lora_name(loras: Path, stem: str) -> str:
         if not (loras / f"{stem}-{n}.safetensors").exists():
             return lora_output_path(f"{stem}-{n}.safetensors")
     return lora_output_path(f"{stem}-{uuid.uuid4().hex[:6]}.safetensors")
+
+
+def _subprocess_env(gpu_ids: Sequence[int]) -> dict[str, str]:
+    """setdefault, not assignment: expandable segments is the only caller of cuMemSetAccess, which
+    some Windows drivers refuse outright, and forcing it left that user no way to turn it off."""
+    import os
+
+    env = {**os.environ}
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    if gpu_ids:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+    return env
 
 
 class Training:
@@ -882,13 +894,10 @@ class Training:
     async def _spawn(
         self, run_id: str, manifest_path: Path
     ) -> asyncio.subprocess.Process:
-        import os
 
         run = ts.get_run(self._conn(), run_id)
         gpu_ids = [int(g) for g in (run["hyperparams"].get("gpuIds") or [])]
-        env = {**os.environ, "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
-        if gpu_ids:
-            env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+        env = _subprocess_env(gpu_ids)
         base = [sys.executable]
         if len(gpu_ids) > 1:
             # DDP: only the small LoRA gradients all-reduce, so scaling is near-linear.

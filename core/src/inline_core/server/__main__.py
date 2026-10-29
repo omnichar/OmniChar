@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging as _logging
 import os as _os
 
 # Default PyTorch to expandable CUDA segments before torch initializes its allocator (it reads this
@@ -26,6 +25,7 @@ from ..extensions.loader import LoadedExtension
 from ..graph.cache import InMemoryCache
 from ..graph.registry import build_default_registry
 from ..models.requirements import RequirementsRegistry
+from ..quiet import quiet_dependency_noise
 from ..runtime.file_store import FileTakeStore
 from ..studio import config as studio_config
 from ..studio.store import StudioStore
@@ -37,20 +37,8 @@ from .run_store import SqliteRunStore
 from .version import report_versions
 
 
-def _quiet_dependency_noise() -> None:
-    """Two third-party import-time warnings that are noise here, not signal.
-
-    diffusers cannot build its torchao ``torch.load`` allowlist because torchao dropped
-    ``uint4_layout``; we never load torchao-serialized checkpoints, and quantization itself is
-    unaffected. torch's pytree then warns about torchao registering Enum subclasses - torchao's to
-    fix, not ours. Both loggers have exactly one warning site, so this hides nothing else.
-    """
-    for name in ("diffusers.quantizers.torchao.torchao_quantizer", "torch.utils._pytree"):
-        _logging.getLogger(name).setLevel(_logging.ERROR)
-
-
 def main() -> None:
-    _quiet_dependency_noise()  # before register_models, which is what pulls diffusers/torchao in
+    quiet_dependency_noise()  # before register_models, which is what pulls diffusers/torchao in
     # Resolved and reported first: model registration is slow and can crash, and the two version
     # numbers are the first thing a bug report needs.
     frontend_root = resolve_frontend_root()

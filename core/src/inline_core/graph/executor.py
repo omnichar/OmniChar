@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 from ..errors import CancelledError, GraphValidationError, InlineCoreError
 from ..runtime.context import ExecutionContext
@@ -16,7 +16,7 @@ from ..runtime.progress import CancelledEvent, ErrorEvent, NodeDoneEvent, RunDon
 from ..runtime.run import NodeRuntimeState, RunState, RunStatus, StateTrackingEmitter
 from .cache import NodeCache, asset_content_hashes, is_cache_eligible, node_cache_key
 from .registry import Registry
-from .schema import Graph, Node
+from .schema import Edge, Graph, Node, is_list_kind
 from .topo import topo_sort, upstream_closure
 from .validate import validate
 
@@ -75,7 +75,7 @@ class Executor:
     ) -> None:
         node = graph.node(node_id)
         runner = self._registry.runner(node.type)
-        inputs = self._resolve_inputs(node, outputs)
+        inputs = self._resolve_inputs(graph, node, outputs)
 
         key: str | None = None
         if runner.produces_takes and is_cache_eligible(node, self._registry):
@@ -98,17 +98,34 @@ class Executor:
             )
 
     def _resolve_inputs(
-        self, node: Node, outputs: dict[str, dict[str, Any]]
+        self, graph: Graph, node: Node, outputs: dict[str, dict[str, Any]]
     ) -> dict[str, list[Any]]:
+        list_ports = {p.id for p in self._registry.get(node.type).inputs if is_list_kind(p.kind)}
         resolved: dict[str, list[Any]] = {}
         for port_id, edges in node.inputs.items():
             values: list[Any] = []
             for edge in edges:
                 upstream = outputs.get(edge.from_node, {})
-                if edge.output in upstream:
-                    values.append(upstream[edge.output])
+                if edge.output not in upstream:
+                    continue
+                value = upstream[edge.output]
+                # A list output into a list input splices in order, as that many wires would
+                # (issue #89); appended whole, the list reached the runner as one stringified item.
+                if (
+                    port_id in list_ports
+                    and isinstance(value, list | tuple)
+                    and self._emits_list(graph, edge)
+                ):
+                    values.extend(cast("list[Any] | tuple[Any, ...]", value))
+                else:
+                    values.append(value)
             resolved[port_id] = values
         return resolved
+
+    def _emits_list(self, graph: Graph, edge: Edge) -> bool:
+        """Whether the wire's source port is declared list-valued, e.g. ``image[]``."""
+        source = self._registry.get(graph.node(edge.from_node).type)
+        return any(p.id == edge.output and is_list_kind(p.kind) for p in source.outputs)
 
     def _take_outputs(self, node: Node, take: Any) -> dict[str, Any]:
         return {port.id: take for port in self._registry.get(node.type).outputs}

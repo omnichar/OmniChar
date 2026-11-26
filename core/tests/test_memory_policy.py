@@ -348,3 +348,19 @@ def test_a_prequantized_footprint_never_lands_on_the_int8_rung() -> None:
         policy = MemoryPolicy(devices=[_CUDA], device=_CUDA, vram_gb=float(vram_gb), ram_gb=64.0)
         fit = policy.estimate_fit(footprint)
         assert fit is None or fit.quant is not Quantization.INT8, (vram_gb, fit)
+
+
+def test_a_model_fp16_overflows_computes_in_fp32_without_bf16() -> None:
+    policy = MemoryPolicy(_CUDA, vram_gb=15.6, supports_bf16=False)
+    policy.set_footprint(ModelFootprint(diffusion_bytes=int(4e9), fp16_overflows=True))
+    assert policy.placement("denoiser").dtype is DType.FP32
+    assert policy.placement("text_encoder").dtype is DType.FP32
+
+
+def test_fp32_compute_is_sized_at_twice_the_bf16_file() -> None:
+    # 10.2GB fits 15.6GB at 16 bits, but not once fp32 doubles it, so it must not claim resident.
+    footprint = ModelFootprint(diffusion_bytes=int(10.2e9), fp16_overflows=True)
+    turing = MemoryPolicy(_CUDA, vram_gb=15.6, supports_bf16=False).estimate_fit(footprint)
+    ampere = MemoryPolicy(_CUDA, vram_gb=15.6, supports_bf16=True).estimate_fit(footprint)
+    assert turing is not None and turing.plan != "resident"
+    assert ampere is not None and ampere.plan == "resident"

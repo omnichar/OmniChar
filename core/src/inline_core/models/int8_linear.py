@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -129,6 +129,8 @@ class ComfyInt8Linear(nn.Module):
         if self.spec.full_precision or not _has_int_mm(x.device):
             bias = None if self.bias is None else self.bias.to(dtype)
             out = nn.functional.linear(x.to(dtype), self.weight.to(dtype), bias)
+        elif torch.is_grad_enabled() and x.requires_grad:
+            out = cast(torch.Tensor, Int8LinearFunction.apply(x.to(dtype), self))
         else:
             out = _int8_linear(x.to(dtype), self.qweight, self.weight_scale, self.bias,
                                self.spec, dtype)
@@ -141,6 +143,22 @@ class ComfyInt8Linear(nn.Module):
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"convrot={self.spec.groupsize}")
+
+
+class Int8LinearFunction(torch.autograd.Function):
+    """int8 forward, dequantised backward: the rounding in between has no gradient."""
+
+    @staticmethod
+    def forward(ctx: Any, x: torch.Tensor, layer: ComfyInt8Linear) -> torch.Tensor:
+        ctx.layer = layer
+        return _int8_linear(x, layer.qweight, layer.weight_scale, layer.bias, layer.spec, x.dtype)
+
+    @staticmethod
+    def backward(ctx: Any, *grads: torch.Tensor) -> tuple[torch.Tensor, None]:
+        # Dequantised per call, not saved, so the frozen base adds no training memory.
+        layer: ComfyInt8Linear = ctx.layer
+        grad = grads[0]
+        return grad @ layer.weight.to(grad.dtype), None
 
 
 def _has_int_mm(device: torch.device) -> bool:
@@ -244,3 +262,22 @@ def convert_with_scales(
     if sum(out[f"{layer}.weight"].shape[0] for layer in specs) != rows_in:
         raise ComponentError("Converting the checkpoint turned int8 layers into something else.")
     return out, specs
+
+
+def quantize_linears(module: nn.Module, names: list[str], spec: Int8Spec) -> None:
+    """Replace named full-precision ``nn.Linear``s with ``ComfyInt8Linear``s holding their codes."""
+    modules = dict(module.named_modules())
+    for name in names:
+        old = modules.get(name)
+        if not isinstance(old, nn.Linear):
+            raise ComponentError(f"{name} is not a Linear, so it cannot be stored int8.")
+        bias: torch.Tensor | None = getattr(old, "bias", None)
+        new = ComfyInt8Linear(old.in_features, old.out_features, bias is not None, spec,
+                              old.weight.dtype, device=old.weight.device)
+        codes, scale = quantize(old.weight.data, spec)
+        new.qweight.copy_(codes)
+        new.weight_scale.copy_(scale)
+        if bias is not None and new.bias is not None:
+            new.bias.copy_(bias.data)
+        parent, _, child = name.rpartition(".")
+        setattr(modules[parent] if parent else module, child, new)

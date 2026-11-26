@@ -65,6 +65,7 @@ def test_full_project_and_canvas_flow(client) -> None:
         "black-forest-labs/flux-2",
         "krea/krea-2-turbo",
         "krea/krea-2-raw",
+        "openmoss/moss-image",
         "minimax/h3-text-to-video",
         "minimax/h3-image-to-video",
         "minimax/h3-first-last-frame",

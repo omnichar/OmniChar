@@ -229,6 +229,23 @@ _MINIMAX_H3 = ArchSpec(
     ),
 )
 
+#: OpenMOSS' ungated repo, for its small configs and chat template only; weights are single files.
+_MOSS = ArchSpec(
+    key="moss-image",
+    assets_repo="OpenMOSS-Team/MOSS-Image-Base",
+    asset_files=tuple(
+        AssetFile(path)
+        for path in (
+            "text_encoder/config.json",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "tokenizer/chat_template.jinja",
+            "vae/config.json",
+            "scheduler/scheduler_config.json",
+        )
+    ),
+)
+
 SPECS: dict[str, ArchSpec] = {
     _ZIMAGE.key: _ZIMAGE,
     _KREA2.key: _KREA2,
@@ -237,6 +254,7 @@ SPECS: dict[str, ArchSpec] = {
     _FLUX2_DEV.key: _FLUX2_DEV,
     _FLUX1.key: _FLUX1,
     _MINIMAX_H3.key: _MINIMAX_H3,
+    _MOSS.key: _MOSS,
 }
 
 

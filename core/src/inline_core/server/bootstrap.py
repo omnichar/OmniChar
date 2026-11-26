@@ -89,6 +89,15 @@ def _register_builtins(
     except ImportError:
         pass
     try:
+        from ..models.moss.provider import MossProvider
+        from ..models.moss.runner import MOSS_IMAGE, register_moss
+
+        register_moss(registry, store, policy)
+        requirements.register(MOSS_IMAGE.type, MossProvider())
+        registered.append(MOSS_IMAGE.type)
+    except ImportError:
+        pass
+    try:
         from ..models.flux2.provider import Flux2Provider
         from ..models.flux2.runner import FLUX2, register_flux2
 

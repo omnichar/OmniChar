@@ -91,6 +91,8 @@ class ModelFootprint:
     controlnet_bytes: int = 0
     #: Already reduced on disk, so no rung may discount them again: int8 bytes are resident bytes.
     prequantized: bool = False
+    #: Activations exceed fp16's range (MOSS-Image's residual stream), so no-bf16 cards need fp32.
+    fp16_overflows: bool = False
 
     @property
     def total_bytes(self) -> int:

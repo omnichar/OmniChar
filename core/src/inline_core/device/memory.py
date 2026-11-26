@@ -245,7 +245,9 @@ class MemoryPolicy(DevicePolicy):
         big = (fp.diffusion_bytes + fp.text_encoder_bytes) / 1e9
         # The VAE and a ControlNet are never quantized, so they cost the same under every plan.
         fixed = (fp.vae_bytes + fp.controlnet_bytes) / 1e9
-        full = big + fixed
+        # A model fp16 overflows computes in fp32 on these cards, so its 16-bit weights double.
+        upcast = 2.0 if fp.fp16_overflows and not self._bf16 and not fp.prequantized else 1.0
+        full = big * upcast + fixed
         # Already at its resident size, so scaling it again scored a 21 GB int8 build as 10.5.
         int8 = full if fp.prequantized else big * _INT8_FACTOR + fixed
         forced = _env_profile() is not None  # explicit --profile pins the profile; fit picks quant
@@ -353,6 +355,8 @@ class MemoryPolicy(DevicePolicy):
             return DType.BF16
         if self._bf16:
             return DType.BF16
+        if self._footprint is not None and self._footprint.fp16_overflows:
+            return DType.FP32
         return DType.FP32 if role == "vae" else DType.FP16
 
     def _offload_mode(self) -> OffloadMode:

@@ -39,7 +39,7 @@ A dataset's trigger word is prepended to every caption during training, so the m
 
 ## Architecture and base model modes
 
-The Trainer's Adjust panel picks the **architecture** first (Z-Image, Krea 2, FLUX.1, FLUX.2, MiniMax H3, or LTX-2.5), then a base within it. Training directly on a step-distilled checkpoint breaks the distillation down (turbo drift), so each architecture offers a way around that.
+The Trainer's Adjust panel picks the **architecture** first (Z-Image, Krea 2, FLUX.1, FLUX.2, MOSS-Image, MiniMax H3, or LTX-2.5), then a base within it. Training directly on a step-distilled checkpoint breaks the distillation down (turbo drift), so each architecture offers a way around that.
 
 **Krea 2** avoids the problem outright, which is why it is the recommended path:
 
@@ -52,6 +52,13 @@ The Trainer's Adjust panel picks the **architecture** first (Z-Image, Krea 2, FL
 - **klein Base 9B** is the larger tier, and wants about 22GB of VRAM and 64GB of system RAM. Put `flux-2-klein-base-9b.safetensors` in `models/diffusion_models/` alongside the **Qwen3-8B** text encoder in `models/text_encoders/` - 9B does not use the 4B encoder, and the model popup fetches the right one once the Base setting is on 9B. Unlike the 4B line this checkpoint is gated and non-commercial, so you accept BFL's licence on Hugging Face first.
 
 Both bases can sit in `models/diffusion_models/` at once; the **Base** setting picks which one a run trains, rather than whichever sorts first.
+
+**MOSS-Image** has nothing distilled to work around. Its **Base** setting picks the build by name, SFT or Base, int8 ConvRot or bf16, from [Comfy-Org/MOSS-Image](https://huggingface.co/Comfy-Org/MOSS-Image):
+
+- **SFT, int8** is the default: `moss_image_sft_int8_convrot.safetensors`, the build the generate node runs. The base stays int8 and the LoRA trains on top, so the 5.4GB model trains in 6.5GB at 512px.
+- **Base precision** offers int8 ConvRot instead of 4-bit. The reference model reads its activation dtype off its weights, and bitsandbytes stores 4-bit weights as bytes, so NF4 is refused. A bf16 base can be stored int8 as it loads.
+- **bf16 GPUs only.** fp16 overflows MOSS-Image's activations, so a T4 is refused before captions encode.
+- The LoRA uses the model's own module names (`layers.N.proj.q`), the same keys community MOSS-Image LoRAs ship, so it loads on the int8 and bf16 builds alike.
 
 **FLUX.1** trains on **dev**, and needs no adapter either - but for a different reason to FLUX.2:
 
@@ -230,6 +237,28 @@ well as its own `0001.ref.mp4`, so a downloaded set can be trained on directly.
 | FLUX.1     | dev             | 512  | **4-bit**      | **10.4GB**    | not measured  |
 | FLUX.1     | dev             | 1024 | bf16           | 26.5GB        | not measured  |
 | FLUX.1     | dev             | 1024 | **4-bit**      | **11.6GB**    | not measured  |
+
+**MOSS-Image is measured on an RTX PRO 4500 (32GB)**, not the L40S and T4 above. One step at rank 16, `torch.cuda.max_memory_allocated`:
+
+| Base         | 512px  | 768px  | 1024px |
+| ------------ | ------ | ------ | ------ |
+| int8 ConvRot | 6.5GB  | 7.3GB  | 8.5GB  |
+| bf16         | 11.0GB | 11.8GB | 12.8GB |
+
+The caption pass runs first and peaks at 10.0GB with the int8 Qwen3.5-9B encoder, higher than any training step at 512px.
+
+Everything one MOSS-Image run needs, from a 400-step run at 512px on the int8 base (rank 16, 12 images):
+
+| Resource          | Caption pass      | Training                     | Notes                                                                          |
+| ----------------- | ----------------- | ---------------------------- | ------------------------------------------------------------------------------ |
+| GPU memory        | 10.0GB            | 6.5GB (8.5GB at 1024px)      | 12GB card minimum; bf16 base 11.0GB at 512px                                   |
+| System RAM        | 16.5GB            | 2.7GB                        | The int8 encoder file is read whole to load it: 24GB minimum, 32GB comfortable |
+| GPU               | Ampere or newer   | Ampere or newer              | bf16 required; a T4 is refused                                                 |
+| Time              | about 1.5 minutes | 0.84 s/step                  | Model loading included; 7 minutes from start to finished file                  |
+| Disk, model files | 9.7GB encoder     | 5.4GB base, 0.25GB VAE       | 15.4GB once; bf16 base is 10.2GB                                               |
+| Disk, per run     | 5.2MB cache       | 149MB LoRA, 144MB checkpoint | Rank 16; the checkpoint is the adapter plus optimizer state                    |
+
+A full character run at 1024px (10 images, 1500 steps, learning rate 1e-4, int8 base) took 88 minutes start to finish, about 3.6 s per step, with 8.8GB of GPU memory in use as `nvidia-smi` reports it. Over a whole run, steps take a little longer than the single-step figures above, because checkpoints are written every 250 steps.
 
 **H3 peaks lower on a 16GB card than it does on a 48GB one.** The run has three phases that never overlap, and on a big card the tallest is the caption pass:
 

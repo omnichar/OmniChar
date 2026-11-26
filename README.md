@@ -48,6 +48,7 @@ Generate locally on your own GPU, in ComfyUI, or with hosted models.
 | [FLUX.2](https://bfl.ai/blog/flux-2) (klein Base 4B / 9B)                | yes   | yes      | yes, ~8.6GB             |
 | [FLUX.1](https://bfl.ai/blog/flux-1) dev (4-bit)                         | yes   | yes      | yes, ~10.4GB            |
 | [Krea 2](https://www.krea.ai/) (RAW, 4-bit)                              | yes   | yes      | yes, ~11.9GB            |
+| [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) (int8 ConvRot)      | yes   | yes      | yes, ~6.5GB             |
 | Z-Image Turbo                                                            | yes   | yes      | yes, ~13.4GB            |
 | [MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) (video, sound) | yes   | yes      | yes but slowly, ~12.7GB |
 | [LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) (video, sound)      | yes   | yes      | no, wants 48GB          |
@@ -234,8 +235,8 @@ frame and the second it happened, so a dip cannot hide behind an average.
 
 - **FLUX.2** applies a character with no training at all. The references ride in the prompt's token
   sequence, so picking one costs nothing but the render.
-- **Krea 2** has no reference channel, so it trains a small adapter for the character once,
-  then reuses it on every render.
+- **Krea 2** and **MOSS-Image** have no reference channel, so each trains a small adapter for the
+  character once, then reuses it on every render.
 - **MiniMax H3** does both. Reference to Video reads the references directly, and its other three
   nodes have no reference channel, so they take a trained adapter instead.
 - **Hosted models** take a character too. Wire one into Nano Banana Pro or MiniMax H3 Reference to
@@ -271,7 +272,9 @@ one, which upstream calls an IC-LoRA.
 The image models train on stills. **FLUX.1** trains on dev - it is guidance-distilled rather than
 step-distilled, so it is its own training base and needs no adapter, and 4-bit puts it on a 12GB
 card at 512px. **FLUX.2** trains on a klein Base build, 4B or 9B, and the adapter still loads on the
-distilled build afterwards. **Krea 2** and **Z-Image** are covered in TRAINING.md.
+distilled build afterwards. **MOSS-Image** trains through its int8 ConvRot file as stored, so the
+5.4GB base needs about 6.5GB at 512px. **Krea 2**, **Z-Image** and **MOSS-Image** are covered in
+TRAINING.md.
 
 Already installed with `--extra all`? The trainer is ready. Otherwise
 `./webui.sh --install --extra training`.
@@ -302,6 +305,9 @@ diffusion model, VAE and text encoder with visible progress. Nothing is fetched 
 - **Z-Image Turbo** is the low-VRAM starting point, distilled to run CFG-free.
 - **[Krea 2](https://www.krea.ai/)** is a 12.9B MMDiT, published as an undistilled RAW base
   alongside an 8-step distilled Turbo build.
+- **[MOSS-Image](https://github.com/OpenMOSS/MOSS-Image)** is OpenMOSS' 5B single-stream DiT with
+  a Qwen3.5-9B text encoder, Apache-2.0. Its int8 ConvRot build is 5.4GB, and generating at 1024
+  peaks near 18GB with the int8 encoder.
 - **[FLUX.2](https://bfl.ai/blog/flux-2)** is natively multi-reference: wire several images and the
   prompt addresses them by position. One node covers klein 4B and 9B, their Base builds, and dev.
 - **[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)** generates video **and its
@@ -335,6 +341,7 @@ core/models/
                      flux-2-klein-base-4b.safetensors    <- FLUX.2 base build, for training
                      flux-2-klein-base-9b.safetensors    <- FLUX.2 9B base, for training (gated)
                      flux1-dev.safetensors               <- FLUX.1 dev, generate and train
+                     moss_image_sft_int8_convrot.safetensors  <- MOSS-Image, generate and train
                      minimax_h3_fl2va_pruned_int8_convrot.safetensors   <- H3 text, image, first/last frame
                      minimax_h3_ref2va_pruned_int8_convrot.safetensors  <- H3 reference node
                      ltx-2.5-22b-distilled-transformer-bf16.safetensors  <- LTX fast mode
@@ -342,6 +349,7 @@ core/models/
   text_encoders/     qwen3vl_4b_bf16.safetensors         <- Krea 2
                      qwen_3_4b.safetensors               <- FLUX.2 klein 4B, shared with Z-Image
                      qwen_3_8b.safetensors               <- FLUX.2 klein 9B
+                     qwen3.5_9b_int8_convrot.safetensors <- MOSS-Image
                      t5xxl_fp16.safetensors              <- FLUX.1 sequence encoder
                      clip_l.safetensors                  <- FLUX.1 pooled encoder
                      qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors       <- H3, Qwen3-VL-32B
@@ -350,6 +358,7 @@ core/models/
   vae/               qwen_image_vae_diffusers.safetensors
                      ae.safetensors                      <- FLUX.1, the same file Z-Image uses
                      flux2-vae.safetensors
+                     flux2-vae_small.safetensors         <- MOSS-Image
                      minimax_h3_video_vae_int8_convrot.safetensors
                      minimax_h3_audio_vae_fp32.safetensors
                      ltx-2.5-video-vae-bf16.safetensors

@@ -8,13 +8,15 @@ xDiT). It is Inline Studio's built-in render backend.
 Models today, all running locally on your own GPU: **Z-Image** (Alibaba Tongyi), a 6B rectified-flow
 diffusion transformer and the model xDiT already supports, so the multi-GPU split works on it from the
 start; **Krea 2** (Krea AI), a 12.9B single-stream MMDiT released as an undistilled RAW base plus an
-8-step distilled Turbo; **FLUX.2** (Black Forest Labs), natively multi-reference; **MiniMax H3**
+8-step distilled Turbo; **FLUX.2** (Black Forest Labs), natively multi-reference; **MOSS-Image**
+(OpenMOSS), a 5B single-stream DiT with a Qwen3.5-9B text encoder; **MiniMax H3**
 (MiniMax), which generates video and its soundtrack in a single pass; and **LTX-2.5** (Lightricks), a
 22B video model, also with sound.
 
 Core also runs the **LoRA trainer** behind Inline Studio's Trainer canvas, so the same engine that
-generates can fine-tune Z-Image, Krea 2, FLUX.2, MiniMax H3 and LTX-2.5 on your own images without a cloud
-step. Training is cheaper than generating: Krea 2 fits a 16GB card at 512px with a 4-bit base. Its
+generates can fine-tune Z-Image, Krea 2, FLUX.2, MOSS-Image, MiniMax H3 and LTX-2.5 on your own images
+without a cloud step. Training is cheaper than generating: Krea 2 fits a 16GB card at 512px with a
+4-bit base, and MOSS-Image trains through its int8 ConvRot file in 6.5GB. Its
 dependencies sit behind the `training` extra. See the
 [LoRA training guide](https://inlinestudio.art/lora-training) for the measured VRAM table.
 
@@ -102,13 +104,21 @@ module layout diffusers has no converter for. `Krea2Transformer2DModel` has no `
 the transformer checkpoint is renamed into diffusers naming on load (`models/krea2/convert.py`) and
 streamed tensor by tensor onto the GPU.
 
+**MOSS-Image loads from [`Comfy-Org/MOSS-Image`](https://huggingface.co/Comfy-Org/MOSS-Image)**: the
+int8 ConvRot or bf16 DiT, the int8 ConvRot or bf16 Qwen3.5-9B encoder, and `flux2-vae_small`. The DiT
+streams in block by block, its fused `proj.qkv` is split into the q/k/v Linears LoRAs address (int8
+per-row scales split with their rows), and int8 layers stay int8. The pipeline is OpenMOSS' own,
+vendored at a pinned commit in `models/moss/vendor/` rather than fetched with `trust_remote_code`.
+The GPTQ w4a8 encoder needs ComfyUI's kernels and is refused by name. Overrides are
+`INLINE_MOSS_MODEL`, `INLINE_MOSS_VAE` and `INLINE_MOSS_TEXT_ENCODER`.
+
 ## Nodes
 
 `/v1/models` serves each node's descriptor (ports, params, file pickers), so the Inline Studio canvas
 renders any node generically - adding a node type needs no UI release.
 
 **High-level model nodes are what the user sees.** Generation is one-click: you drop a single
-**Z-Image Turbo**, **Krea 2**, **FLUX.2**, **MiniMax H3** or **LTX-2.5** node, wire a Prompt into
+**Z-Image Turbo**, **Krea 2**, **FLUX.2**, **MOSS-Image**, **MiniMax H3** or **LTX-2.5** node, wire a Prompt into
 it, and hit Run. The node hooks up the diffusion model, VAE, and text-encoder behind the scenes - no
 loader/sampler wiring.
 

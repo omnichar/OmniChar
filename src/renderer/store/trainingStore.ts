@@ -23,6 +23,8 @@ import type {
   TrainingSampleEvent,
   TrainingSnapshot,
 } from '@shared/types'
+import { pairCaptions } from '@shared/captionPairing'
+import { isCaptionFile, readCaptionFiles } from '../lib/captionFiles'
 import { uploadFiles } from '../lib/importFiles'
 import { useAssetStore } from './assetStore'
 import { studio } from '@/lib/studio'
@@ -277,7 +279,12 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
   },
 
   stageFiles: async (files) => {
-    const assets = await uploadFiles(files, null)
+    // Captions are read here, not uploaded: Core imports media only, so a .txt never reached it.
+    const captions = await readCaptionFiles(files)
+    const assets = await uploadFiles(
+      files.filter((f) => !isCaptionFile(f)),
+      null,
+    )
     if (!assets.length) return []
     const res = await studio().training.stageAssets(assets.map((a) => a.id))
     if (!res.ok) {
@@ -285,7 +292,11 @@ export const useTrainingStore = create<TrainingState>((set, get) => ({
       return null
     }
     await useAssetStore.getState().load()
-    return res.value
+    const paired = pairCaptions(
+      res.value.map((row) => row.name),
+      captions,
+    )
+    return res.value.map((row) => ({ ...row, caption: paired.get(row.name) ?? row.caption }))
   },
 
   stageFromPath: async (path) => {

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,3 +235,47 @@ def _reference_name_for(name: str, present: set[str]) -> str | None:
         if candidate in present:
             return candidate
     return None
+
+
+def _stem(name: str) -> str:
+    return Path(name).stem.lower()
+
+
+def pair_captions(image_names: list[str], captions: dict[str, str]) -> dict[str, str]:
+    """Image name -> caption: exact stem first, then a bare number (``1.txt``) unique both ways."""
+    # Mirrored by src/shared/captionPairing.ts; tests on both sides pin the same cases.
+    paired: dict[str, str] = {}
+    used: set[str] = set()
+    for image in image_names:
+        text = captions.get(_stem(image))
+        if text is not None:
+            paired[image] = text
+            used.add(_stem(image))
+    by_number: dict[int, list[str]] = {}
+    for image in image_names:
+        if image in paired:
+            continue
+        for number in {int(n) for n in re.findall(r"\d+", _stem(image))}:
+            by_number.setdefault(number, []).append(image)
+    claims: dict[str, list[str]] = {}
+    for stem in captions:
+        if stem in used or not stem.isdigit():
+            continue
+        candidates = by_number.get(int(stem), [])
+        if len(candidates) == 1:
+            claims.setdefault(candidates[0], []).append(stem)
+    for image, stems in claims.items():
+        if len(stems) == 1:
+            paired[image] = captions[stems[0]]
+    return paired
+
+
+def folder_captions(folder: Path) -> dict[str, str]:
+    """Every non-empty ``.txt`` directly in ``folder``, as ``stem -> caption``."""
+    captions: dict[str, str] = {}
+    for path in folder.glob("*.txt"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                captions[path.stem.lower()] = text
+    return captions

@@ -135,6 +135,30 @@ def test_add_from_path_imports_a_folder_with_its_sidecar_captions(
     assert len(list((project / "assets").iterdir())) == 2
 
 
+def test_numbered_captions_pair_to_named_images_on_a_folder_import(
+    conn: sqlite3.Connection, tmp_path: object
+) -> None:
+    from pathlib import Path
+
+    from inline_core.studio.training import Training
+
+    # The layout people export: descriptive image names, captions numbered 1.txt, 2.txt, ...
+    src = Path(str(tmp_path)) / "src"
+    src.mkdir()
+    for n, shot in ((1, "front-studio"), (2, "profile-studio"), (10, "bw-sidelight")):
+        (src / f"lin-{n:02d}-{shot}.png").write_bytes(b"x")
+        (src / f"{n}.txt").write_text(f"lin, {shot}")
+    project = Path(str(tmp_path)) / "project"
+    project.mkdir()
+    staged = Training(_Store(conn, project), events=None).stage_from_path(str(src))
+
+    assert {r["name"]: r["caption"] for r in staged} == {
+        "lin-01-front-studio.png": "lin, front-studio",
+        "lin-02-profile-studio.png": "lin, profile-studio",
+        "lin-10-bw-sidelight.png": "lin, bw-sidelight",
+    }
+
+
 def test_add_from_path_rejects_a_folder_that_is_not_one(
     conn: sqlite3.Connection, tmp_path: object
 ) -> None:

@@ -34,7 +34,7 @@ from ..training.dataset import (
 )
 from . import training_store as ts
 from .activity import ActivityRun
-from .dataset_import import read_metadata, walk_files
+from .dataset_import import folder_captions, pair_captions, read_metadata, walk_files
 
 _CAPTION_EXT = ".txt"
 
@@ -207,17 +207,23 @@ class Training:
         imported = [(p, ax.import_file(conn, project, str(p), None)) for p in media]
         by_name = {relative(p): a["id"] for p, a in imported if a}
 
+        # Per folder, so `train/1.txt` never captions an image in `test/`.
+        sidecars: dict[Path, str] = {}
+        for parent in {p.parent for p in media}:
+            sidecars.update(
+                (parent / name, text)
+                for name, text in pair_captions(
+                    [p.name for p in media if p.parent == parent], folder_captions(parent)
+                ).items()
+            )
         staged: list[dict[str, Any]] = []
         for source, asset in imported:
             name = relative(source)
             if asset is None or name in references:
                 continue
             entry = metadata.get(name)
-            sidecar = source.with_suffix(_CAPTION_EXT)
-            caption = ""
-            if sidecar.is_file():
-                caption = sidecar.read_text(encoding="utf-8").strip()
-            elif entry is not None:
+            caption = sidecars.get(source, "")
+            if not caption and entry is not None:
                 caption = entry.caption
             reference_name = entry.reference if entry else reference_for_name(Path(name), names)
             staged.append(

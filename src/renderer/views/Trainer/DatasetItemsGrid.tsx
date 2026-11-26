@@ -1,30 +1,13 @@
 /** The dataset panel: what a dataset holds, with one entry point for changing it. */
 import { useMemo, useState } from 'react'
+import { pairCaptions } from '@shared/captionPairing'
+import { readCaptionFiles } from '@/lib/captionFiles'
 import { uploadFiles } from '@/lib/importFiles'
 import { useAssetStore } from '../../store/assetStore'
 import { useTrainingStore } from '../../store/trainingStore'
 import { AddDataDialog } from './AddDataDialog'
 import { PairTile } from './PairTile'
 import { ipcErrorMessage } from '../../lib/ipcError'
-
-function baseName(name: string): string {
-  const stem = name.replace(/\.[^.]+$/, '')
-  return stem.toLowerCase()
-}
-
-/** Read every dropped/picked `.txt` into a `basename -> caption` map, so it can pair with images. */
-async function readCaptionFiles(files: File[]): Promise<Map<string, string>> {
-  const captions = new Map<string, string>()
-  await Promise.all(
-    files
-      .filter((f) => f.name.toLowerCase().endsWith('.txt'))
-      .map(async (f) => {
-        const text = (await f.text()).trim()
-        if (text) captions.set(baseName(f.name), text)
-      }),
-  )
-  return captions
-}
 
 // Clips are accepted for the archs that can train on them (MiniMax H3). An arch that cannot is
 // handed images only by the precache, so a stray clip is skipped rather than breaking a run.
@@ -82,11 +65,18 @@ export function DatasetItemsGrid({ datasetId }: { datasetId: string }): React.JS
       const captions = await readCaptionFiles(files)
       // Captions dropped on their own: pair them to items already in the dataset by filename.
       if (!media.length) {
+        const named = items.flatMap((it) => {
+          const asset = byId.get(it.assetId)
+          return asset ? [{ item: it, name: asset.name }] : []
+        })
+        const paired = pairCaptions(
+          named.map((n) => n.name),
+          captions,
+        )
         await Promise.all(
-          items.map((it) => {
-            const asset = byId.get(it.assetId)
-            const caption = asset ? captions.get(baseName(asset.name)) : undefined
-            return caption ? setCaption(datasetId, it.id, caption) : undefined
+          named.map(({ item, name }) => {
+            const caption = paired.get(name)
+            return caption ? setCaption(datasetId, item.id, caption) : undefined
           }),
         )
         return
@@ -99,9 +89,13 @@ export function DatasetItemsGrid({ datasetId }: { datasetId: string }): React.JS
       )
       // Pair each new item to its sidecar caption by the image's original filename.
       const itemByAsset = new Map(created.map((it) => [it.assetId, it]))
+      const paired = pairCaptions(
+        uploaded.map((a) => a.name),
+        captions,
+      )
       await Promise.all(
         uploaded.map((asset) => {
-          const caption = captions.get(baseName(asset.name))
+          const caption = paired.get(asset.name)
           const item = itemByAsset.get(asset.id)
           return caption && item ? setCaption(datasetId, item.id, caption) : undefined
         }),

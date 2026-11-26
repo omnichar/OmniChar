@@ -108,3 +108,91 @@ def test_component_json_shape():
         "source": "Comfy-Org/z_image/ae.safetensors",
         "optional": False,
     }
+
+
+def _blocking_hub(monkeypatch, release, *, fail: bool = False):
+    """A Hub that holds every fetch until ``release`` is set, counting how many it started."""
+    hub = pytest.importorskip("huggingface_hub")
+    calls: list[str] = []
+
+    def fake_download(repo, rfilename, local_dir, token=None, tqdm_class=None):
+        calls.append(rfilename)
+        release.wait(5)
+        if fail:
+            raise OSError("connection reset")
+        dest = Path(local_dir) / rfilename
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"weights")
+        return str(dest)
+
+    monkeypatch.setattr(hub, "hf_hub_download", fake_download)
+    return calls
+
+
+def _two_requests(downloads, provider, comp):
+    """Start two downloads of one file, the second while the first is mid-fetch (issue #88)."""
+    import threading
+
+    statuses: list[str] = []
+    errors: list[BaseException] = []
+
+    def run():
+        try:
+            downloads._download_component(provider, comp, lambda f, s: statuses.append(s))
+        except BaseException as error:  # noqa: BLE001 - collected for the assertions
+            errors.append(error)
+
+    first, second = threading.Thread(target=run), threading.Thread(target=run)
+    first.start()
+    return first, second, statuses, errors
+
+
+def test_a_second_request_for_a_file_in_flight_waits_instead_of_racing(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    release = threading.Event()
+    calls = _blocking_hub(monkeypatch, release)
+    downloads = ModelDownloads(events=None)
+    comp = types.SimpleNamespace(repo="r/m", repo_file="m.safetensors", filename="m.safetensors",
+                                 label="Model")
+    provider = types.SimpleNamespace(download_target=lambda c: tmp_path)
+    first, second, statuses, errors = _two_requests(downloads, provider, comp)
+    while not calls:
+        time.sleep(0.01)
+    second.start()
+    time.sleep(0.1)
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert errors == []
+    assert calls == ["m.safetensors"], "the second request must not start its own fetch"
+    assert (tmp_path / "m.safetensors").read_bytes() == b"weights"
+    assert any("already downloading" in s for s in statuses)
+    assert not (tmp_path / "m.safetensors.part").exists()
+
+
+def test_a_waiter_gets_the_owners_error(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    release = threading.Event()
+    calls = _blocking_hub(monkeypatch, release, fail=True)
+    downloads = ModelDownloads(events=None)
+    comp = types.SimpleNamespace(repo="r/m", repo_file="m.safetensors", filename="m.safetensors",
+                                 label="Model")
+    provider = types.SimpleNamespace(download_target=lambda c: tmp_path)
+    first, second, _statuses, errors = _two_requests(downloads, provider, comp)
+    while not calls:
+        time.sleep(0.01)
+    second.start()
+    time.sleep(0.1)
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert len(errors) == 2 and all("connection reset" in str(e) for e in errors)
+    assert not (tmp_path / "m.safetensors").exists()
+    # Nothing left in flight, so a retry starts a fresh fetch rather than waiting forever.
+    assert downloads._inflight == {}

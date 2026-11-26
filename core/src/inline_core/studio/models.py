@@ -19,6 +19,7 @@ import logging
 import shutil
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,15 @@ class DownloadCancelled(Exception):
     """Raised out of the progress callback, the only per-chunk seam a download has."""
 
 
+@dataclass
+class _InFlight:
+    """One file being fetched, which a second request for the same file waits on instead."""
+
+    done: threading.Event = field(default_factory=threading.Event)
+    listeners: list[Callable[[float, str], None]] = field(default_factory=lambda: [])
+    error: str | None = None
+
+
 class ModelDownloads:
     """Answers "what's missing" and downloads components into the models dir on request.
 
@@ -88,6 +98,9 @@ class ModelDownloads:
         self._lock = threading.Lock()
         # Held so a download in flight is not garbage collected out from under itself.
         self._tasks: set[asyncio.Task[Any]] = set()
+        # Destination file -> its fetch in progress. Two fetches of one file share a staging dir,
+        # and the first to finish deletes it under the other (issue #88).
+        self._inflight: dict[str, _InFlight] = {}
 
     # --- requirements (the popup's data) --------------------------------------------------------
 
@@ -339,6 +352,47 @@ class ModelDownloads:
                     "fraction": fraction, "status": status})
 
     def _download_component(
+        self,
+        provider: RequirementsProvider,
+        comp: Any,
+        on_progress: Callable[[float, str], None],
+    ) -> None:
+        """Fetch a component, or wait on the fetch of the same file already running."""
+        key = str(provider.download_target(comp) / comp.filename)
+        with self._lock:
+            running = self._inflight.get(key)
+            owner = running is None
+            if running is None:
+                running = self._inflight[key] = _InFlight()
+            running.listeners.append(on_progress)
+        if not owner:
+            on_progress(0.0, f"{comp.label} is already downloading…")
+            running.done.wait()
+            if running.error is not None:
+                raise RuntimeError(running.error)
+            return
+
+        def fan_out(fraction: float, status: str) -> None:
+            on_progress(fraction, status)  # the owner's may raise DownloadCancelled; that stops it
+            with self._lock:
+                waiters = [cb for cb in running.listeners if cb is not on_progress]
+            for waiter in waiters:
+                try:
+                    waiter(fraction, status)
+                except Exception:  # noqa: BLE001 - a waiter's cancel must not stop the owner's fetch
+                    pass
+
+        try:
+            self._fetch_component(provider, comp, fan_out)
+        except BaseException as error:
+            running.error = str(error) or type(error).__name__
+            raise
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            running.done.set()
+
+    def _fetch_component(
         self,
         provider: RequirementsProvider,
         comp: Any,

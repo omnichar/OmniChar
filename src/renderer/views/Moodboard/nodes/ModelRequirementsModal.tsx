@@ -64,7 +64,10 @@ function ComponentRow({
         </div>
       )}
       {busy && dl?.status && <span className="text-[10px] text-zinc-500">{dl.status}</span>}
-      {dl?.error && <span className="text-[10px] text-red-400">Download failed: {dl.error}</span>}
+      {/* A file on disk outranks a failed attempt at it: a duplicate fetch can fail after another landed it. */}
+      {dl?.error && !comp.present && (
+        <span className="text-[10px] text-red-400">Download failed: {dl.error}</span>
+      )}
     </div>
   )
 }

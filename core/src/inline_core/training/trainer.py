@@ -240,6 +240,7 @@ def train(manifest: dict[str, Any]) -> str | None:
     # together they add the text encoder's several GB to the base; apart, peak is just the base.
     # Before the precache, never after: this costs milliseconds and precaching costs twenty
     # minutes, and the failure it catches only surfaces once the base finally loads.
+    models.check_device(arch.key)
     models.check_base_mappable(manifest["modelsDir"], arch.key, manifest["baseMode"])
 
     protocol.progress(0, steps, status="caching latents")
@@ -299,6 +300,10 @@ def train(manifest: dict[str, Any]) -> str | None:
             str(hp.get("trainingMode") or archs.MODE_CLIP),
         ),
     )
+    if quant is Quantization.INT8:
+        from . import int8_lora
+
+        int8_lora.register(config)
     # ``add_adapter`` is diffusers' PeftAdapterMixin, which every arch loaded through diffusers
     # carries. LTX's transformer is a plain nn.Module from its own loader and has no such method,
     # so it takes peft's model-agnostic injection instead. Both leave the adapter where

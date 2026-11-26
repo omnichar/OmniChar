@@ -70,6 +70,13 @@ const BASES: Record<TrainingArch, { value: TrainingBaseMode; label: string }[]> 
   // LTX-2.5 trains on the dev transformer. The adapter then loads on all three LTX nodes, in fast
   // mode as well as quality - they are the same architecture.
   'ltx-2-5': [{ value: 'raw', label: 'LTX-2.5 dev (required)' }],
+  // int8 ConvRot builds first: the 5.4GB base trains in about 6GB and is the file generation runs.
+  'moss-image': [
+    { value: 'sft', label: 'MOSS-Image SFT, int8 (recommended)' },
+    { value: 'sft_bf16', label: 'MOSS-Image SFT, bf16' },
+    { value: 'raw', label: 'MOSS-Image Base, int8' },
+    { value: 'raw_bf16', label: 'MOSS-Image Base, bf16' },
+  ],
 }
 
 /**
@@ -77,12 +84,19 @@ const BASES: Record<TrainingArch, { value: TrainingBaseMode; label: string }[]> 
  * cards people have; MiniMax H3 is absent for the opposite reason - it is 4-bit only, and a picker
  * with one option is a lie. Both are hidden rather than shown and then refused.
  */
-const QUANTIZABLE: TrainingArch[] = ['krea2', 'flux1', 'flux2']
+const QUANTIZABLE: TrainingArch[] = ['krea2', 'flux1', 'flux2', 'moss-image']
 
 const QUANTS: { value: TrainingBaseQuant; label: string }[] = [
   { value: 'auto', label: 'Auto (fit to this GPU)' },
   { value: 'none', label: 'Full precision (bf16)' },
   { value: 'nf4', label: '4-bit (NF4)' },
+]
+
+/** MOSS-Image quantizes to int8 ConvRot instead: its model cannot run on NF4 weights. */
+const MOSS_QUANTS: { value: TrainingBaseQuant; label: string }[] = [
+  { value: 'auto', label: 'Auto (fit to this GPU)' },
+  { value: 'none', label: 'Full precision (bf16)' },
+  { value: 'int8', label: 'int8 ConvRot' },
 ]
 
 /** Activation offload to host RAM, the way to fit a bf16 base on a card that is a few GB short. */
@@ -97,6 +111,10 @@ const SCOPES: { value: TrainingLoraScope; label: string }[] = [
   { value: 'attention', label: 'Attention only' },
 ]
 
+function quantsFor(arch: TrainingArch): { value: TrainingBaseQuant; label: string }[] {
+  return arch === 'moss-image' ? MOSS_QUANTS : QUANTS
+}
+
 const ARCHS: { value: TrainingArch; label: string }[] = [
   { value: 'z-image', label: 'Z-Image' },
   { value: 'krea2', label: 'Krea 2' },
@@ -106,6 +124,7 @@ const ARCHS: { value: TrainingArch; label: string }[] = [
   // "(video)" like H3, not "(video + audio)": the model generates a soundtrack, but training only
   // adapts the video branch, and this label sits in the Trainer.
   { value: 'ltx-2-5', label: 'LTX-2.5 (video)' },
+  { value: 'moss-image', label: 'MOSS-Image' },
 ]
 
 function NumberField({
@@ -179,9 +198,16 @@ export function TrainerSettingsPanel({ itemId }: { itemId: string }): React.JSX.
   const set = <K extends keyof TrainingHyperparams>(key: K, value: TrainingHyperparams[K]): void =>
     setHp((current) => ({ ...current, [key]: value }))
 
-  // Base modes are per-architecture, so switching arch must also move to a base that exists.
+  // Base modes and precisions are per-architecture, so a switch must land on values that exist.
   const setArch = (next: TrainingArch): void =>
-    setHp((current) => ({ ...current, arch: next, baseMode: BASES[next][0].value }))
+    setHp((current) => ({
+      ...current,
+      arch: next,
+      baseMode: BASES[next][0].value,
+      baseQuant: quantsFor(next).some((q) => q.value === current.baseQuant)
+        ? current.baseQuant
+        : 'auto',
+    }))
 
   // What the typed seconds actually resolve to on H3's frame grid, shown under the field.
   const clipGrid = clipGridFor(arch)
@@ -303,6 +329,12 @@ export function TrainerSettingsPanel({ itemId }: { itemId: string }): React.JSX.
             node's LoRA input. 4-bit base, so it needs a big card.
           </span>
         )}
+        {arch === 'moss-image' && (
+          <span className="text-[10px] text-zinc-600">
+            Train on SFT to generate with SFT. An int8 base trains as stored, and the LoRA loads on
+            the int8 and bf16 builds alike.
+          </span>
+        )}
         {arch === 'ltx-2-5' && (
           <span className="text-[10px] text-zinc-600">
             Trains on clips. Wire the result into any LTX-2.5 node's LoRA input. A 22B base, so this
@@ -384,15 +416,16 @@ export function TrainerSettingsPanel({ itemId }: { itemId: string }): React.JSX.
             onChange={(e) => set('baseQuant', e.target.value as TrainingBaseQuant)}
             className="rounded-md border border-border bg-black/30 px-2 py-1 text-sm text-zinc-100 outline-none focus:border-zinc-500"
           >
-            {QUANTS.map((q) => (
+            {quantsFor(arch).map((q) => (
               <option key={q.value} value={q.value}>
                 {q.label}
               </option>
             ))}
           </select>
           <span className="text-[10px] text-zinc-600">
-            4-bit freezes the base at NF4 and trains the LoRA full precision: ~12GB at 512px instead
-            of ~30GB.
+            {arch === 'moss-image'
+              ? 'int8 freezes the base at 5.4GB and trains the LoRA full precision: about 6.5GB at 512px instead of 11GB.'
+              : '4-bit freezes the base at NF4 and trains the LoRA full precision: ~12GB at 512px instead of ~30GB.'}
           </span>
         </label>
       )}

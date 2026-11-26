@@ -358,6 +358,12 @@ def _flux2_caption(components: Any, caption: str, device: str) -> dict[str, Any]
     return {"embed": embeds[0]}  # (seq, 3 * hidden); FLUX.2 pads to a fixed length, no mask needed
 
 
+def _moss_caption(components: Any, caption: str, device: str) -> dict[str, Any]:
+    from . import moss
+
+    return moss.caption(components, caption, device)
+
+
 #: arch -> (latent encoder, caption encoder). Each arch reuses its own pipeline's encoding path, so
 #: a training latent is byte-for-byte what generation would produce from the same image.
 _ENCODERS = {
@@ -366,6 +372,8 @@ _ENCODERS = {
     # running batch-norm statistics, so the latent encoder is shared rather than copied.
     archs.FLUX1: (_flux1_latent, _flux1_caption),
     archs.FLUX2: (_flux2_latent, _flux2_caption),
+    # MOSS-Image decodes with FLUX.2's exact 2x2 unpack and batch-norm statistics.
+    archs.MOSS_IMAGE: (_flux2_latent, _moss_caption),
 }
 
 

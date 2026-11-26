@@ -59,6 +59,12 @@ _ENV = {
         "vae": "INLINE_LTX25_VIDEO_VAE",
         "text_encoders": "INLINE_LTX25_TEXT_ENCODER",
     },
+    # The same variables generation reads, so both pick one file. No adapter: nothing is distilled.
+    archs.MOSS_IMAGE: {
+        "diffusion_models": "INLINE_MOSS_MODEL",
+        "vae": "INLINE_MOSS_VAE",
+        "text_encoders": "INLINE_MOSS_TEXT_ENCODER",
+    },
 }
 
 
@@ -142,6 +148,15 @@ def _resolve(arch: str, category: str, variant: Any = None) -> Any:
         if category == "clip":
             return flux1_reqs.resolve_clip(None)
         return flux1_reqs.resolve_diffusion(None)
+
+    if arch == archs.MOSS_IMAGE:
+        from ..models.moss import requirements as moss_reqs
+
+        if category == "vae":
+            return moss_reqs.resolve_vae()
+        if category == "text_encoders":
+            return moss_reqs.resolve_text_encoder()
+        return None  # the base comes from the base mode, never from a scan
 
     if arch == archs.KREA2:
         from ..models.krea2 import requirements as krea2_reqs
@@ -284,6 +299,20 @@ def load_encoders(
         )
         return Encoders(vae, text_encoder, tokenizer, scheduler, pipeline)
 
+    if arch == archs.MOSS_IMAGE:
+        from ..models.moss import load as moss_load
+        from ..models.moss.vendor.pipeline_moss_image import MOSSImagePipeline
+
+
+        vae = moss_load.load_vae(vae_file, dtype, device=device)
+        text_encoder, tokenizer = moss_load.load_text_encoder(encoder_file, dtype, device=device)
+        scheduler = moss_load.load_scheduler()
+        # Transformer-less: captions go through the pipeline's own chat template and hidden state.
+        pipeline = MOSSImagePipeline(
+            transformer=None, scheduler=scheduler, text_encoder=text_encoder, tokenizer=tokenizer,
+        )
+        return Encoders(vae, text_encoder, tokenizer, scheduler, pipeline)
+
     if arch == archs.FLUX1:
         from diffusers import FluxPipeline
 
@@ -370,6 +399,8 @@ _ACTIVATION_MB_PER_TOKEN = {
     "flux2-klein-4b": 1.6,
     "flux2-klein-9b": 0.6,
     archs.FLUX1: 0.6,
+    # Measured: 6.5GB at 512px and 8.5GB at 1024px on the int8 base, rank 16.
+    archs.MOSS_IMAGE: 0.7,
 }
 
 #: Room left for the adapter, its 8-bit optimizer state and allocator slack.
@@ -411,6 +442,13 @@ def resolve_quant(
             )
         return Quantization.NONE
 
+    if arch == archs.MOSS_IMAGE:
+        return _moss_quant(base_quant, models_dir, base_mode, resolution)
+    if base_quant == "int8":
+        raise RuntimeError(
+            f"{arch} has no int8 training path; int8 ConvRot is MOSS-Image's. Set the base "
+            "precision back to auto."
+        )
     if base_quant == "none":
         return Quantization.NONE
     if base_quant == "nf4":
@@ -435,6 +473,38 @@ def resolve_quant(
     ) + _MARGIN_BYTES
     fits = torch.cuda.get_device_properties(0).total_memory >= needed
     return Quantization.NONE if fits else Quantization.NF4
+
+
+def _moss_quant(base_quant: str, models_dir: str, base_mode: str, resolution: int) -> Any:
+    """MOSS-Image trains on int8 ConvRot or bf16; its reference model cannot run under NF4."""
+    from ..device.policy import Quantization
+    from ..models.comfy_int8 import is_int8_file
+
+    if base_quant == "nf4":
+        raise RuntimeError(
+            "MOSS-Image has no 4-bit training path: its model picks activation dtypes from its "
+            "weights, which bitsandbytes stores as bytes. Use int8, which trains in about 6GB."
+        )
+    if base_quant not in ("auto", "int8", "none"):
+        raise RuntimeError(f"Unknown base quantization {base_quant!r}.")
+    if is_int8_file(_base_file(Path(models_dir), archs.MOSS_IMAGE, base_mode)):
+        if base_quant == "none":
+            raise RuntimeError(
+                "This MOSS-Image base is the int8 ConvRot build, which has no full-precision "
+                "weights to train against. Pick a bf16 base, or set the base precision to auto."
+            )
+        return Quantization.INT8
+    if base_quant != "auto":
+        return Quantization.INT8 if base_quant == "int8" else Quantization.NONE
+
+    import torch
+
+    if not torch.cuda.is_available():
+        return Quantization.NONE
+    base = _base_size(models_dir, archs.MOSS_IMAGE, base_mode)
+    needed = base + _activation_bytes(archs.MOSS_IMAGE, resolution) + _MARGIN_BYTES
+    fits = torch.cuda.get_device_properties(0).total_memory >= needed
+    return Quantization.NONE if fits else Quantization.INT8
 
 
 def resolve_offload(
@@ -520,6 +590,19 @@ def _memory_totals() -> tuple[int, int]:
     except (OSError, ValueError, IndexError):
         return 0, 0
     return found.get("MemTotal", 0), found.get("SwapTotal", 0)
+
+
+def check_device(arch: str) -> None:
+    """Refuse MOSS-Image below Ampere: fp16 overflows it, and emulated bf16 would crawl."""
+    import torch
+
+    if arch != archs.MOSS_IMAGE or not torch.cuda.is_available():
+        return
+    if torch.cuda.get_device_capability() < (8, 0):
+        raise RuntimeError(
+            "MOSS-Image trains in bf16, which this GPU has no hardware for. Train it on an "
+            "Ampere or newer card; it still generates here."
+        )
 
 
 def check_base_mappable(models_dir: str, arch: str, base_mode: str) -> None:
@@ -612,6 +695,10 @@ def load_transformer(
             loader_arch(arch, models_dir, base_mode), diffusion, config, dtype, quant,
             device=device, loras=loras,
         )
+    if arch == archs.MOSS_IMAGE:
+        from . import moss
+
+        return moss.load_base(diffusion, device, dtype, quant)
     if arch == archs.KREA2:
         return loaders.load_krea2_transformer(
             diffusion, dtype, quant, device=device, loras=loras
@@ -638,6 +725,8 @@ def _base_file(root: Path, arch: str, base_mode: str) -> str:
         return _flux1_base_file(root)
     if arch == archs.FLUX2:
         return _flux2_base_file(root, base_mode)
+    if arch == archs.MOSS_IMAGE:
+        return _moss_base_file(root, base_mode)
     if arch != archs.KREA2:
         return _require(root, arch, "diffusion_models")
 
@@ -652,6 +741,28 @@ def _base_file(root: Path, arch: str, base_mode: str) -> str:
             f"Add {reqs.DIFFUSION_FILES[variant]} there."
         )
     return str(diffusion)
+
+
+def _moss_base_file(root: Path, base_mode: str) -> str:
+    """The MOSS-Image build a base mode names; the file is chosen, never scanned for."""
+    override = os.environ.get(_ENV[archs.MOSS_IMAGE]["diffusion_models"])
+    if override:
+        if not Path(override).is_file():
+            raise RuntimeError(f"{_ENV[archs.MOSS_IMAGE]['diffusion_models']} names no file.")
+        return override
+    from ..models.moss.requirements import TRAINING_BASES
+
+    name = TRAINING_BASES.get(base_mode)
+    if name is None:
+        raise RuntimeError(f"MOSS-Image has no base mode {base_mode!r}.")
+    path = root / "diffusion_models" / name
+    if not path.is_file():
+        raise RuntimeError(
+            f"{name} is not under {root / 'diffusion_models'}. Download it from "
+            "Comfy-Org/MOSS-Image "
+            f"(or set {_ENV[archs.MOSS_IMAGE]['diffusion_models']})."
+        )
+    return str(path)
 
 
 def _flux1_base_file(root: Path) -> str:

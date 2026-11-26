@@ -676,7 +676,14 @@ export interface ModelDownloadErrorEvent {
  * The model family a LoRA is trained for. `minimax-h3` and `ltx-2-5` are the video models: they
  * train on stills or clips, and the adapter applies to every node of that family at generation time.
  */
-export type TrainingArch = 'z-image' | 'krea2' | 'flux1' | 'flux2' | 'minimax-h3' | 'ltx-2-5'
+export type TrainingArch =
+  | 'z-image'
+  | 'krea2'
+  | 'flux1'
+  | 'flux2'
+  | 'minimax-h3'
+  | 'ltx-2-5'
+  | 'moss-image'
 
 /**
  * Which shape an LTX-2.5 run trains in. `clip` learns a look and how it moves, from single clips.
@@ -713,14 +720,21 @@ export interface DatasetRepoPreview {
  * Base 9B - a size rather than a distillation choice, and `raw` stays 4B so saved runs resolve to
  * the checkpoint they were trained against.
  */
-export type TrainingBaseMode = 'turbo_adapter' | 'deturbo' | 'raw' | 'raw_9b'
+export type TrainingBaseMode =
+  | 'turbo_adapter'
+  | 'deturbo'
+  | 'raw'
+  | 'raw_9b'
+  | 'raw_bf16'
+  | 'sft'
+  | 'sft_bf16'
 
 /**
  * Precision of the frozen base during training. The LoRA itself is always full precision, so `nf4`
  * only costs base fidelity - and it is what puts Krea 2 (a 26GB base) on a 16GB card. `auto` sizes
  * the base plus its activations against your GPU and picks for you.
  */
-export type TrainingBaseQuant = 'auto' | 'none' | 'nf4'
+export type TrainingBaseQuant = 'auto' | 'none' | 'nf4' | 'int8'
 
 /** Stream saved activations to host RAM so a bf16 base fits a smaller card. */
 export type TrainingOffload = 'auto' | 'on' | 'off'

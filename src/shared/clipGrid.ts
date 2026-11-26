@@ -33,6 +33,7 @@ export const CLIP_GRIDS: Record<TrainingArch, ClipGrid | null> = {
   flux2: null,
   'minimax-h3': { fps: 24, grid: 17, offset: 5 },
   'ltx-2-5': { fps: 24, grid: 8, offset: 1 },
+  'moss-image': null,
 }
 
 /** The shortest clip a grid encodes: one whole chunk plus the head. */

@@ -72,6 +72,10 @@ def base_components(arch: str, base_mode: str) -> list[ModelComponent]:
         if not promoted:
             return _required(rows)
         return promoted + [c for c in _required(rows) if c.id not in replaced]
+    if arch == "moss-image":
+        from .moss import requirements as reqs
+
+        return reqs.training_requirements(base_mode)
     if arch == "ltx-2-5":
         from .ltx25 import requirements as reqs
 

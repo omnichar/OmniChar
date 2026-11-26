@@ -8,6 +8,7 @@ call is shaped. Those four live here so ``trainer.py`` stays one loop.
 All of them are rectified flow, but with **opposite conventions**, which is exactly the kind of
 detail a test should pin: Z-Image and MiniMax H3 predict ``clean - noise`` at timestep
 ``1 - sigma``, while Krea 2, FLUX.1, FLUX.2 and LTX-2.5 predict ``noise - clean`` at ``sigma``.
+MOSS-Image predicts ``noise - clean`` too, but at ``sigma * 1000``, the scale its scheduler feeds.
 
 LTX-2.5 is the one that looks like a third convention and is not. Its published model is an
 ``X0Model`` returning a denoised latent, but that is a weightless wrapper over a velocity model, and
@@ -27,6 +28,7 @@ FLUX1 = "flux1"
 FLUX2 = "flux2"
 MINIMAX_H3 = "minimax-h3"
 LTX25 = "ltx-2-5"
+MOSS_IMAGE = "moss-image"
 
 #: LTX-2.5 trains in two shapes. A **Clip LoRA** learns a look and how it moves, from single clips.
 #: A **Control LoRA** learns a transform from paired reference and target clips - upstream calls
@@ -146,6 +148,10 @@ _MINIMAX_H3_TARGETS = [
 #: that one projection, so including it would silently make "attention" mean "everything". On
 #: FLUX.2 this scope therefore adapts the double blocks only - the text/image fusion stage.
 _ATTENTION = (
+    "proj.q",
+    "proj.k",
+    "proj.v",
+    "proj.o",
     "to_q",
     "to_k",
     "to_v",
@@ -391,6 +397,28 @@ def _flux2_forward(transformer: Any, noisy: Any, timestep: Any, item: dict[str, 
 
 
 
+# --- MOSS-Image -----------------------------------------------------------------------------------
+
+#: Each block's six Linears; ``proj.`` keeps a bare ``ffn_down`` off the text embedder's refiner.
+_MOSS_TARGETS = [
+    "proj.q", "proj.k", "proj.v", "proj.o", "proj.ffn_up_gate", "proj.ffn_down",
+]
+
+
+def _moss_sigma(device: Any, shift: float) -> Any:
+    import torch
+
+    # Unshifted: MOSS trained on a shift-1 grid; inference's shift 5 only places its steps.
+    del shift
+    return torch.sigmoid(torch.randn((), device=device))
+
+
+def _moss_forward(transformer: Any, noisy: Any, timestep: Any, item: dict[str, Any]) -> Any:
+    from . import moss
+
+    return moss.forward(transformer, noisy, timestep, item)
+
+
 # --- MiniMax H3 -----------------------------------------------------------------------------------
 
 
@@ -554,6 +582,15 @@ ARCHS: dict[str, TrainingArch] = {
         timestep=lambda sigma: sigma,
         target=lambda clean, noise: noise - clean,
         forward=_flux2_forward,
+    ),
+    MOSS_IMAGE: TrainingArch(
+        key=MOSS_IMAGE,
+        target_modules=_MOSS_TARGETS,
+        sigma=_moss_sigma,
+        # x_t = (1 - s) * clean + s * noise, so the velocity is noise - clean, at t = s * 1000.
+        timestep=lambda sigma: sigma * 1000.0,
+        target=lambda clean, noise: noise - clean,
+        forward=_moss_forward,
     ),
     MINIMAX_H3: TrainingArch(
         key=MINIMAX_H3,
